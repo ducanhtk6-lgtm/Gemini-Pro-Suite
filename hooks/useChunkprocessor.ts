@@ -355,8 +355,7 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
                 setStats(prev => {
                     const newValue = prev.cooldownSeconds - 1;
                     if (newValue <= 0) {
-// FIX: Added missing backticks to template literal.
-                        addLog(`Hết thời gian chờ (Cooldown). Tiếp tục xử lý...`, 'info');
+                        addLog("Hết thời gian chờ (Cooldown). Tiếp tục xử lý...", 'info');
                         return { ...prev, isCoolingDown: false, cooldownSeconds: 0 };
                     }
                     return { ...prev, cooldownSeconds: newValue };
@@ -556,7 +555,6 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
                 required: ['improved_transcript', 'boundary'],
             };
 
-            // FIX: Moved safetySettings out of the config object.
             const apiCall = ai.models.generateContent({
                 model: modelStep1,
                 contents: { parts: [
@@ -566,13 +564,13 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
                 config: {
                     responseMimeType: "application/json",
                     responseSchema: responseSchema,
-                },
-                safetySettings: [
-                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                ]
+                    safetySettings: [
+                        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    ]
+                }
             });
 
             const timeoutPromise = new Promise((_, reject) => 
@@ -777,9 +775,9 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
             const s1Words = computeStep1WordCount(mergedTranscript);
             const s2Words = computeStep2WordCount(finalResult.refined_script);
             const delta = s2Words - s1Words;
-            const deltaPercent = s1Words > 0 ? (delta / s1Words * 100) : 0;
+            const deltaPercent = s1Words > 0 ? (delta / s1Words * 100).toFixed(1) : "0.0";
 // FIX: Added missing backticks to template literal.
-            addLog(`STEP 2 METRICS: segments=${finalResult.refined_script.length}, words=${s2Words}, deltaWords=${delta}, deltaPercent=${deltaPercent.toFixed(1)}%`, 'success');
+            addLog(`STEP 2 METRICS: segments=${finalResult.refined_script.length}, words=${s2Words}, deltaWords=${delta}, deltaPercent=${deltaPercent}%`, 'success');
 // FIX: Added missing backticks to template literal.
             addLog(`Hoàn tất Step 2: Đã tạo văn bản chuyên nghiệp.`, 'success');
 
@@ -1324,7 +1322,6 @@ const runStep2Once = async (
         required: ["mode", "refined_script", "removal_report", "qa_audit"],
     };
 
-    // FIX: Moved safetySettings out of the config object.
     const apiCall = ai.models.generateContent({
         model,
         contents: { parts: [{ text: fullPrompt }] },
@@ -1333,13 +1330,13 @@ const runStep2Once = async (
             maxOutputTokens: 8192,
             responseMimeType: "application/json",
             responseSchema: responseSchema,
-        },
-        safetySettings: [
-            { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-            { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-            { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-        ]
+            safetySettings: [
+                { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            ]
+        }
     });
 
     const timeoutPromise = new Promise((_, reject) =>
@@ -1556,7 +1553,6 @@ const runStep3Once = async (
     };
 
     try {
-        // FIX: Moved safetySettings out of the config object.
         const response = await ai.models.generateContent({
             model,
             contents: { parts: [{ text: fullPrompt }] },
@@ -1564,13 +1560,13 @@ const runStep3Once = async (
                 temperature: 0.2,
                 responseMimeType: "application/json",
                 responseSchema: step3Schema,
-            },
-            safetySettings: [
-                { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-            ]
+                safetySettings: [
+                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                ]
+            }
         });
 
         const rawText = response.text;

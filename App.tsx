@@ -1,7 +1,9 @@
+
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { TranscriptionTurn } from './types';
 import { createBlob } from './utils/audio';
+// FIX: Corrected import path casing to match the hook's filename.
 import { useChunkProcessor } from './hooks/useChunkProcessor';
 import { Dashboard } from './components/Dashboard';
 import { ImageGenerator } from './components/ImageGenerator';

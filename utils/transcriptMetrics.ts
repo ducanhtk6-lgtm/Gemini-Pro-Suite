@@ -51,6 +51,13 @@ export const computeStep2WordCount = (items: RefinedScriptItem[]): number => {
     return items.reduce((total, item) => total + countWords(item.text), 0);
 };
 
+/**
+ * Tính tổng số từ cho kết quả Step 3.
+ */
+export const computeStep3WordCount = (finalText: string): number => {
+  return countWords(finalText || "");
+};
+
 // Heuristic để xác định các điểm có rủi ro y khoa
 const MED_RISK_REGEX = new RegExp(
     '\\b(\\d|mg|g|ml|mmhg|bpm|mmol\\/l|%|°c|chẩn đoán|điều trị|liều|triệu chứng|cơ chế|phác đồ|biến chứng|xét nghiệm|cận lâm sàng|lâm sàng|dấu hiệu)\\b',

@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Chunk, LogEntry, ProcessingStats, TranscriptionOutput, ImprovedTranscriptItem, RateLimitEvent, RemovalAuditResult, DetailedRemovalRow, Batch } from '../types';
+import { Chunk, LogEntry, ProcessingStats, TranscriptionOutput, ImprovedTranscriptItem, RateLimitEvent, RemovalAuditResult, DetailedRemovalRow, Step3Result, Step3VerificationCheck, Step3MeaningDriftItem } from '../types';
 import { ActivityLog } from './ActivityLog';
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
-import { computeRemovalAudit } from '../utils/transcriptMetrics';
+import { computeRemovalAudit, computeStep3WordCount } from '../utils/transcriptMetrics';
 
 /**
  * @LOCKED_UI_COMPONENT
@@ -34,18 +34,19 @@ interface DashboardProps {
     setStep2Model: (model: string) => void;
     rateLimitEvent: RateLimitEvent | null;
     clearCooldownNow: (reason: string) => void;
-    // New Props for Step 2 Batching
-    step2Batches: Batch[];
-    retryBatch: (id: string) => void;
-    retryAllFailedBatches: () => void;
+    // Step 3 props
+    triggerStep3: () => void;
+    isStep3Running: boolean;
 }
 
 // Icons
 const FileTextIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>;
 const ClockIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>;
-const CheckCircleIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>;
+// FIX: Modified component to accept and spread props to allow className to be passed.
+const CheckCircleIcon = (props: React.SVGProps<SVGSVGElement>) => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>;
 const LoaderIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>;
-const AlertTriangleIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>;
+// FIX: Modified component to accept and spread props to allow className to be passed.
+const AlertTriangleIcon = (props: React.SVGProps<SVGSVGElement>) => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>;
 const RefreshCwIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>;
 const CopyIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>;
 const DownloadIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>;
@@ -58,6 +59,7 @@ const ZapIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height=
 const SparklesIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9a2 2 0 0 1 2 2a6 6 0 0 0-9-9a2 2 0 0 1-2-2Z"/><path d="M3 12a6 6 0 0 0 9 9a2 2 0 0 1 2 2a6 6 0 0 0-9-9a2 2 0 0 1-2-2Z"/></svg>;
 const BrainCircuitIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.993.142"/><path d="M12 5a3 3 0 1 1 5.993.142"/><path d="M15 12a3 3 0 1 0-5.993.142"/><path d="M15 12a3 3 0 1 1 5.993.142"/><path d="M9 12a3 3 0 1 0-5.993.142"/><path d="M9 12a3 3 0 1 1 5.993.142"/><path d="M12 19a3 3 0 1 0-5.993.142"/><path d="M12 19a3 3 0 1 1 5.993.142"/><path d="M16 8.27A3 3 0 0 1 14.23 11l-2.46 4a3 3 0 0 1-5.54.142"/><path d="M8 8.27A3 3 0 0 0 9.77 11l2.46 4a3 3 0 0 0 5.54.142"/></svg>;
 const CheckBadgeIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.78l1.21 1.21a2 2 0 0 0 2.82 0l1.21-1.21a4 4 0 0 1 4.78 4.78l-1.21 1.21a2 2 0 0 0 0 2.82l1.21 1.21a4 4 0 0 1-4.78 4.78l-1.21-1.21a2 2 0 0 0-2.82 0l-1.21 1.21a4 4 0 0 1-4.78-4.78l1.21-1.21a2 2 0 0 0 0-2.82z"/><path d="m9 12 2 2 4-4"/></svg>;
+const BookOpenIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>;
 
 
 const formatDuration = (ms: number) => {
@@ -152,7 +154,7 @@ const ApiOverloadRecoveryPanel = ({
 export const Dashboard: React.FC<DashboardProps> = ({
     file, onReset, chunks, stats, logs, result, fileType, retryChunk, retryAllFailed, isFinalizing, triggerStep2, manualAppendTranscript,
     step1Model, setStep1Model, step2Model, setStep2Model, rateLimitEvent, clearCooldownNow,
-    step2Batches, retryBatch, retryAllFailedBatches
+    triggerStep3, isStep3Running
 }) => {
     const [elapsed, setElapsed] = useState(0);
     // If file is null, default to 'input' tab. Else default to 'grid'.
@@ -192,7 +194,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     }, [stats.completed, stats.total, isManualMode]);
 
     const parseRawTextToJSON = (rawText: string) => {
-        // Regex to find timestamp at the start of a line (Supports 00:00, 0:00, [00:00], (00:00))
+        // Regex để tìm timestamp ở đầu dòng (Hỗ trợ 00:00, 0:00, [00:00], (00:00))
         // Group 1: Timestamp string
         // Group 2: Text content (optional)
         const lines = rawText.split('\n');
@@ -208,11 +210,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 let ts = match[1];
                 let content = match[2].trim();
                 
-                // Normalize timestamp to [MM:SS] or [HH:MM:SS]
+                // Chuẩn hóa timestamp thành dạng [MM:SS] hoặc [HH:MM:SS]
                 if (!ts.startsWith('[')) ts = `[${ts}]`;
 
-                // ALWAYS create a new item when a timestamp is found, even with empty content
-                // (as content might be on the next line)
+                // LUÔN LUÔN tạo item mới khi thấy timestamp, dù content có rỗng hay không
+                // (Vì nội dung có thể nằm ở dòng tiếp theo)
                 items.push({
                     timestamp: ts,
                     original: content,
@@ -221,10 +223,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     uncertain: false
                 });
             } else {
-                // If the line has no timestamp, append it to the last item
+                // Nếu dòng không có timestamp, nối vào item gần nhất
                 if (items.length > 0) {
                     const lastItem = items[items.length - 1];
-                    // Add a space if the previous item already had content
+                    // Thêm khoảng trắng nếu item trước đó đã có nội dung
                     const separator = lastItem.original ? " " : "";
                     lastItem.original += separator + cleanLine;
                     lastItem.edited += separator + cleanLine;
@@ -244,7 +246,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 // Parse Raw Text -> JSON -> Append
                 const parsedItems = parseRawTextToJSON(manualInput);
                 if (parsedItems.length === 0) {
-                    alert("No valid timestamps found (e.g., 00:00 or 01:23). Please check the format.");
+                    alert("Không tìm thấy timestamp hợp lệ (VD: 00:00 hoặc 01:23). Vui lòng kiểm tra định dạng.");
                     return;
                 }
                 const jsonString = JSON.stringify(parsedItems);
@@ -252,7 +254,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             }
             setManualInput("");
         } catch (e: any) {
-            alert("Data Error: " + e.message);
+            alert("Lỗi dữ liệu: " + e.message);
         }
     };
 
@@ -262,24 +264,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <StatCard 
                     icon={isManualMode ? <EditIcon /> : <FileTextIcon />} 
-                    label={isManualMode ? "Mode" : "Document"} 
+                    label={isManualMode ? "Chế độ" : "Tài liệu"} 
                     value={isManualMode ? "Manual Input" : file?.name} 
-                    subValue={isManualMode ? "Step 2 Post-Edit" : (file!.size / 1024 / 1024).toFixed(2) + " MB"} 
+                    subValue={isManualMode ? "Step 2 & 3" : (file!.size / 1024 / 1024).toFixed(2) + " MB"} 
                 />
                 
                 {isManualMode ? (
-                     <StatCard icon={<FileTextIcon />} label="Items Imported" value={(result?.improved_transcript?.length || 0).toString()} subValue="Dialogue lines" color="text-teal-400" />
+                     <StatCard icon={<FileTextIcon />} label="Items đã nhập" value={(result?.improved_transcript?.length || 0).toString()} subValue="Dòng hội thoại" color="text-teal-400" />
                 ) : (
                     <>
-                        <StatCard icon={<ClockIcon />} label="Time" value={formatDuration(elapsed)} subValue={stats.endTime ? "Completed" : "Running..."} />
-                        <StatCard icon={<CheckCircleIcon />} label="Completed" value={`${stats.completed}/${stats.total}`} color="text-green-400" />
-                        <StatCard icon={<LoaderIcon />} label="Processing" value={stats.processing.toString()} color="text-blue-400" />
+                        <StatCard icon={<ClockIcon />} label="Thời gian" value={formatDuration(elapsed)} subValue={stats.endTime ? "Hoàn tất" : "Đang chạy..."} />
+                        <StatCard icon={<CheckCircleIcon />} label="Hoàn thành" value={`${stats.completed}/${stats.total}`} color="text-green-400" />
+                        <StatCard icon={<LoaderIcon />} label="Đang xử lý" value={stats.processing.toString()} color="text-blue-400" />
                     </>
                 )}
                 
                 <div className="bg-gray-800 p-3 rounded-lg border border-gray-700 flex flex-col justify-between">
                     <div className="flex items-center gap-2 text-gray-400 text-xs uppercase font-bold tracking-wider">
-                        <AlertTriangleIcon /> <span>Failed</span>
+                        <AlertTriangleIcon /> <span>Thất bại</span>
                     </div>
                     <div className="flex justify-between items-end mt-1">
                         <span className={`text-xl font-mono font-bold ${stats.failed > 0 ? 'text-red-400' : 'text-gray-500'}`}>{stats.failed}</span>
@@ -301,7 +303,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             {!isManualMode && (
                 <div className="relative w-full">
                     <div className="flex justify-between mb-1 text-xs font-medium text-gray-400">
-                        <span>Processing Progress (Step 1)</span>
+                        <span>Tiến độ xử lý (Step 1)</span>
                         <span>{Math.round(progressPercentage)}%</span>
                     </div>
                     <div className={`w-full bg-gray-700 rounded-full h-2.5 overflow-hidden ${stats.isCoolingDown ? 'opacity-60 grayscale' : ''}`}>
@@ -313,11 +315,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </div>
             )}
             
-            {/* Step 2 Loading Indicator (Common) */}
+            {/* Step 2/3 Loading Indicators (Common) */}
             {isFinalizing && (
-                <div className="w-full bg-purple-900/20 border border-purple-800 p-3 rounded flex items-center justify-center gap-3 animate-pulse">
+                <div className="w-full bg-blue-900/20 border border-blue-800 p-3 rounded flex items-center justify-center gap-3 animate-pulse">
                     <LoaderIcon />
-                    <span className="text-purple-300 font-bold">Running Step 2: Refining and generating professional script...</span>
+                    <span className="text-blue-300 font-bold">Đang chạy Step 2: Tinh chỉnh và tạo script chuyên nghiệp...</span>
+                </div>
+            )}
+            {isStep3Running && (
+                 <div className="w-full bg-indigo-900/20 border border-indigo-800 p-3 rounded flex items-center justify-center gap-3 animate-pulse">
+                    <LoaderIcon />
+                    <span className="text-indigo-300 font-bold">Đang chạy Step 3: Tạo văn bản liên tục và kiểm định...</span>
                 </div>
             )}
 
@@ -326,7 +334,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <div className="bg-yellow-900/30 border border-yellow-700/50 text-yellow-200 px-4 py-2 rounded-lg flex items-center justify-between animate-pulse">
                     <div className="flex items-center gap-2">
                         <ClockIcon />
-                        <span className="text-sm font-medium">System is cooling down to avoid Rate Limit</span>
+                        <span className="text-sm font-medium">Hệ thống đang nghỉ (Cooldown) để tránh Rate Limit</span>
                     </div>
                     <span className="font-mono font-bold">{formatDuration(stats.cooldownSeconds * 1000)}</span>
                 </div>
@@ -366,14 +374,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                 onClick={() => setActiveTab('grid')}
                                 className={`flex-1 py-3 text-sm font-medium text-center transition-colors ${activeTab === 'grid' ? 'bg-gray-700 text-blue-300 border-b-2 border-blue-400' : 'text-gray-400 hover:bg-gray-700/50'}`}
                             >
-                                Chunk Grid
+                                Lưới phân đoạn
                             </button>
                         )}
                         <button 
                             onClick={() => setActiveTab('text')}
                             className={`flex-1 py-3 text-sm font-medium text-center transition-colors ${activeTab === 'text' ? 'bg-gray-700 text-teal-300 border-b-2 border-teal-400' : 'text-gray-400 hover:bg-gray-700/50'}`}
                         >
-                            Results (Step 1 & 2)
+                            Kết quả (Step 1, 2 & 3)
                         </button>
                     </div>
 
@@ -387,7 +395,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             <div className="flex flex-col h-full gap-4">
                                 <div className="flex flex-col gap-2 h-full">
                                     <div className="flex justify-between items-center">
-                                         <label className="text-xs font-bold text-gray-400 uppercase">Input Data</label>
+                                         <label className="text-xs font-bold text-gray-400 uppercase">Dữ liệu đầu vào</label>
                                          <div className="flex bg-gray-900 rounded-lg p-1 border border-gray-700">
                                             <button 
                                                 onClick={() => setInputType('json')}
@@ -408,15 +416,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                         className="w-full flex-1 min-h-[150px] bg-gray-900 border border-gray-700 rounded p-3 text-xs font-mono text-gray-300 focus:outline-none focus:border-teal-500 transition-colors"
                                         placeholder={inputType === 'json' 
                                             ? '[ { "timestamp": "...", "original": "...", "edited": "..." }, ... ]' 
-                                            : "00:00 Hello everyone\n00:05 Today we will learn..."}
+                                            : "00:00 Xin chào các bạn\n00:05 Hôm nay chúng ta sẽ học bài mới..."}
                                         value={manualInput}
                                         onChange={(e) => setManualInput(e.target.value)}
                                     />
                                     <div className="flex justify-between items-center mt-2">
                                         <div className="text-[10px] text-gray-500 italic">
                                             {inputType === 'raw' 
-                                                ? "Auto-detects timestamps (e.g., 00:00, [12:30]) and converts to application format."
-                                                : "Paste an array of ImprovedTranscriptItem[] directly."
+                                                ? "Tự động phát hiện timestamp (VD: 00:00, [12:30]) và chuyển đổi sang format ứng dụng."
+                                                : "Dán trực tiếp mảng JSON ImprovedTranscriptItem[]."
                                             }
                                         </div>
                                         <button 
@@ -424,18 +432,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                             className="px-4 py-2 bg-teal-700 hover:bg-teal-600 text-white text-sm rounded-lg font-bold flex items-center gap-2 shadow-lg"
                                         >
                                             <PlusCircleIcon /> 
-                                            {inputType === 'raw' ? "Convert & Add" : "Append Data"}
+                                            {inputType === 'raw' ? "Chuyển đổi & Thêm" : "Nối thêm dữ liệu"}
                                         </button>
                                     </div>
 
                                     {/* Preview List */}
                                     <div className="border-t border-gray-700 pt-4 flex-1 flex flex-col overflow-hidden mt-2">
-                                        <h4 className="text-xs font-bold text-gray-400 mb-2 uppercase">Current Data in Memory ({result?.improved_transcript?.length || 0} lines)</h4>
+                                        <h4 className="text-xs font-bold text-gray-400 mb-2 uppercase">Dữ liệu hiện có trong bộ nhớ ({result?.improved_transcript?.length || 0} dòng)</h4>
                                         <div className="flex-1 overflow-y-auto bg-gray-900/50 rounded p-2 border border-gray-800 custom-scrollbar">
                                             {result?.improved_transcript && result.improved_transcript.length > 0 ? (
                                                 <RawTranscriptView items={result.improved_transcript} />
                                             ) : (
-                                                <div className="text-gray-600 text-center italic mt-10">No data yet.</div>
+                                                <div className="text-gray-600 text-center italic mt-10">Chưa có dữ liệu.</div>
                                             )}
                                         </div>
                                     </div>
@@ -449,9 +457,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                 isFinalizing={isFinalizing} 
                                 onTriggerStep2={triggerStep2}
                                 fileName={file?.name || 'manual_transcript'}
-                                step2Batches={step2Batches}
-                                onRetryBatch={retryBatch}
-                                onRetryAllFailedBatches={retryAllFailedBatches}
+                                onTriggerStep3={triggerStep3}
+                                isStep3Running={isStep3Running}
                             />
                         )}
                     </div>
@@ -463,7 +470,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         <ActivityLog logs={logs} />
                     </div>
                     
-                    {/* Manual Trigger for Step 2 */}
+                    {/* Manual Triggers */}
                     {isManualMode && result?.improved_transcript && result.improved_transcript.length > 0 && !result.post_edit_result && (
                          <button 
                             onClick={triggerStep2}
@@ -471,7 +478,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             className="w-full py-4 bg-teal-600 hover:bg-teal-500 text-white rounded-lg transition-colors font-bold shadow-lg shadow-teal-900/20 flex items-center justify-center gap-2"
                         >
                             {isFinalizing ? <LoaderIcon /> : <PlayIcon />}
-                            RUN STEP 2 (POST-EDIT)
+                            CHẠY STEP 2 (POST-EDIT)
+                        </button>
+                    )}
+                     {isManualMode && result?.post_edit_result && !result.step3_result && (
+                         <button 
+                            onClick={triggerStep3}
+                            disabled={isStep3Running}
+                            className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors font-bold shadow-lg shadow-indigo-900/20 flex items-center justify-center gap-2"
+                        >
+                            {isStep3Running ? <LoaderIcon /> : <BookOpenIcon />}
+                            CHẠY STEP 3 (VĂN BẢN + KIỂM TRA)
                         </button>
                     )}
 
@@ -479,7 +496,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         onClick={onReset}
                         className="w-full py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors font-medium border border-gray-600 hover:border-gray-500"
                     >
-                        {isManualMode ? "Exit Manual Mode" : "Start New Job"}
+                        {isManualMode ? "Thoát Manual Mode" : "Bắt đầu công việc mới"}
                     </button>
                 </div>
             </div>
@@ -502,7 +519,7 @@ const StatCard = ({ icon, label, value, subValue, color = "text-gray-200" }: any
 );
 
 const ChunkGrid = ({ chunks, onRetry }: { chunks: Chunk[], onRetry: (id: string) => void }) => {
-    if (chunks.length === 0) return <div className="flex items-center justify-center h-full text-gray-500 italic">Initializing list...</div>;
+    if (chunks.length === 0) return <div className="flex items-center justify-center h-full text-gray-500 italic">Đang khởi tạo danh sách...</div>;
 
     return (
         <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">
@@ -521,36 +538,6 @@ const ChunkGrid = ({ chunks, onRetry }: { chunks: Chunk[], onRetry: (id: string)
                 >
                     {chunk.index + 1}
                     {chunk.status === 'failed' && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded">
-                            <RefreshCwIcon />
-                        </div>
-                    )}
-                </div>
-            ))}
-        </div>
-    );
-};
-
-const BatchGrid = ({ batches, onRetry }: { batches: Batch[], onRetry: (id: string) => void }) => {
-    if (batches.length === 0) return null;
-
-    return (
-        <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">
-            {batches.map((batch) => (
-                <div 
-                    key={batch.id}
-                    className={`
-                        aspect-square rounded border flex items-center justify-center text-xs font-mono cursor-default relative group
-                        ${batch.status === 'completed' ? 'bg-green-900/30 border-green-700 text-green-400' : 
-                          batch.status === 'processing' ? 'bg-purple-900/30 border-purple-700 text-purple-400 animate-pulse' :
-                          batch.status === 'failed' ? 'bg-red-900/30 border-red-700 text-red-400 cursor-pointer hover:bg-red-900/50' :
-                          'bg-gray-800 border-gray-700 text-gray-500'}
-                    `}
-                    onClick={() => batch.status === 'failed' && onRetry(batch.id)}
-                    title={`Batch #${batch.index} - ${batch.status}${batch.error ? ': ' + batch.error : ''}`}
-                >
-                    {batch.index + 1}
-                    {batch.status === 'failed' && (
                         <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded">
                             <RefreshCwIcon />
                         </div>
@@ -613,45 +600,45 @@ const AiActionsPanel = ({ transcriptText, onResult, onLoadingChange }: { transcr
 
         switch(action) {
             case 'summarize':
-                title = 'Content Summary';
-                prompt = `Summarize the following medical lecture into a short, concise paragraph focusing on the main ideas and key conclusions:\n\n---\n\n${transcriptText}`;
+                title = 'Tóm tắt nội dung';
+                prompt = `Tóm tắt bài giảng y khoa sau đây thành một đoạn văn ngắn gọn, súc tích, tập trung vào các ý chính và kết luận quan trọng:\n\n---\n\n${transcriptText}`;
                 break;
             case 'key-points':
-                title = 'Key Points';
-                prompt = `List the most important key points from the following medical lecture. Present them as bullet points:\n\n---\n\n${transcriptText}`;
+                title = 'Các điểm chính';
+                prompt = `Liệt kê các điểm chính (key points) quan trọng nhất từ bài giảng y khoa sau. Trình bày dưới dạng gạch đầu dòng:\n\n---\n\n${transcriptText}`;
                 break;
             case 'titles':
-                title = 'Suggested Titles';
-                prompt = `Based on the content of the following medical lecture, suggest 5 engaging and relevant titles:\n\n---\n\n${transcriptText}`;
+                title = 'Đề xuất tiêu đề';
+                prompt = `Dựa vào nội dung bài giảng y khoa sau, hãy đề xuất 5 tiêu đề hấp dẫn và phù hợp:\n\n---\n\n${transcriptText}`;
                 break;
             case 'deep-analysis':
-                title = 'In-depth Analysis (Thinking Mode)';
+                title = 'Phân tích chuyên sâu (Thinking Mode)';
                 model = 'gemini-3-pro-preview';
                 config = { thinkingConfig: { thinkingBudget: 32768 } };
-                prompt = `Perform an in-depth analysis of the following medical lecture. Focus on identifying complex concepts, relationships between ideas, points of potential confusion, and suggest related topics for further study. Present the results in a clear, structured format:\n\n---\n\n${transcriptText}`;
+                prompt = `Thực hiện phân tích chuyên sâu bài giảng y khoa sau. Tập trung vào việc xác định các khái niệm phức tạp, mối liên hệ giữa các ý, các điểm có thể gây nhầm lẫn và đề xuất các chủ đề liên quan để nghiên cứu thêm. Trình bày kết quả một cách có cấu trúc rõ ràng:\n\n---\n\n${transcriptText}`;
                 break;
         }
 
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-            // FIX: `safetySettings` must be a property of the `config` object.
+            // FIX: `safetySettings` has been moved out of the `config` object to the top level of the request.
             const response = await ai.models.generateContent({
                 model,
                 contents: prompt,
                 config: {
                     ...config,
-                    safetySettings: [
-                        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-                        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    ],
                 },
+                safetySettings: [
+                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                ],
             });
-            onResult(title, response.text || 'No response.');
+            onResult(title, response.text || 'Không có phản hồi.');
         } catch (error: any) {
             console.error(`AI Action (${action}) failed:`, error);
-            onResult(`Error during ${title}`, error.message || 'An unknown error occurred.');
+            onResult(`Lỗi khi ${title}`, error.message || 'An unknown error occurred.');
         } finally {
             onLoadingChange(false);
         }
@@ -664,11 +651,11 @@ const AiActionsPanel = ({ transcriptText, onResult, onLoadingChange }: { transcr
                 <span>AI Actions</span>
             </h3>
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                <button onClick={() => handleAction('summarize')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Summarize</button>
-                <button onClick={() => handleAction('key-points')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Key Points</button>
-                <button onClick={() => handleAction('titles')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Titles</button>
-                 <button onClick={() => handleAction('deep-analysis')} className="px-3 py-2 bg-violet-800 hover:bg-violet-700 text-white text-xs rounded font-bold transition-colors flex items-center justify-center gap-1.5" title="Uses Gemini 3 Pro with Thinking Mode">
-                    <BrainCircuitIcon /> In-depth Analysis
+                <button onClick={() => handleAction('summarize')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Tóm tắt</button>
+                <button onClick={() => handleAction('key-points')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Điểm chính</button>
+                <button onClick={() => handleAction('titles')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Tiêu đề</button>
+                 <button onClick={() => handleAction('deep-analysis')} className="px-3 py-2 bg-violet-800 hover:bg-violet-700 text-white text-xs rounded font-bold transition-colors flex items-center justify-center gap-1.5" title="Sử dụng Gemini 3 Pro với Thinking Mode">
+                    <BrainCircuitIcon /> Phân tích sâu
                 </button>
             </div>
         </div>
@@ -762,23 +749,122 @@ const RemovalAuditReport = ({ metrics }: { metrics: RemovalAuditResult }) => {
     );
 };
 
+const Step3Report = ({ result, fileName }: { result: Step3Result, fileName: string }) => {
+    const [copied, setCopied] = useState(false);
+
+    const handleCopy = () => {
+        navigator.clipboard.writeText(result.final.text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+    };
+
+    const downloadFile = (content: string, type: string, extension: string) => {
+        const safeFileName = fileName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        const blob = new Blob([content], { type });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${safeFileName}_${extension}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
+
+    const getRiskColor = (level: number) => {
+        if (level >= 4) return 'border-red-600/50 bg-red-900/10';
+        if (level === 3) return 'border-yellow-600/50 bg-yellow-900/10';
+        return 'border-gray-700 bg-gray-800/50';
+    };
+
+    return (
+        <div className="space-y-4">
+            {/* Final Text */}
+            <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 relative group">
+                <div className="flex items-center justify-between mb-2">
+                    <h3 className="font-bold text-indigo-400 uppercase text-xs tracking-wider flex items-center gap-2">
+                        <BookOpenIcon />
+                        <span>Văn bản hoàn chỉnh (Step 3)</span>
+                    </h3>
+                    <div className="flex items-center gap-4">
+                         <button onClick={handleCopy} className="text-gray-500 hover:text-indigo-400 transition-colors flex items-center gap-2 text-xs">
+                            {copied ? <CheckCircleIcon /> : <CopyIcon />} {copied ? 'Đã chép' : 'Chép'}
+                        </button>
+                        <button onClick={() => downloadFile(result.final.text, 'text/plain', 'step3_final.txt')} className="text-gray-500 hover:text-indigo-400 transition-colors flex items-center gap-2 text-xs">
+                            <DownloadIcon /> Tải TXT
+                        </button>
+                    </div>
+                </div>
+                 <div className="text-xs font-mono text-gray-500 bg-gray-950/50 p-1.5 rounded-md mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span>Words: <b className="text-gray-300">{computeStep3WordCount(result.final.text)}</b></span>
+                    <span className="text-gray-600">|</span>
+                    <span className={result.verification.overall_pass ? 'text-green-400' : 'text-red-400'}>
+                        Fidelity Check: <b className="font-bold">{result.verification.overall_pass ? 'PASS' : 'FAIL'}</b>
+                    </span>
+                    <span className="text-gray-600">|</span>
+                    <span>Max Risk: <b className={result.meaning_drift_report.summary.max_risk >= 4 ? 'text-red-400' : 'text-yellow-400'}>{result.meaning_drift_report.summary.max_risk}</b></span>
+                    <span className="text-gray-600">|</span>
+                    <span>High-Risk Items: <b className={result.meaning_drift_report.summary.high_risk_count > 0 ? 'text-red-400' : 'text-gray-300'}>{result.meaning_drift_report.summary.high_risk_count}</b></span>
+                </div>
+                <pre className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap font-sans bg-black/20 p-3 rounded max-h-[400px] overflow-y-auto custom-scrollbar">{result.final.text}</pre>
+            </div>
+            
+            {/* Details */}
+             <details className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 opacity-80 hover:opacity-100 transition-opacity">
+                <summary className="font-bold text-gray-300 uppercase text-xs tracking-wider cursor-pointer">Chi tiết quá trình Step 3</summary>
+                 <div className="mt-4 pt-4 border-t border-gray-700 space-y-4">
+                     {/* Verification */}
+                     <div>
+                         <h4 className="font-bold text-gray-400 mb-2">Báo cáo kiểm tra (Verification)</h4>
+                         <div className="bg-gray-950/50 p-3 rounded-md space-y-2 text-xs">
+                             {result.verification.checks.map(check => (
+                                 <div key={check.id} className="flex items-start gap-2">
+                                     {check.pass ? <CheckCircleIcon className="text-green-500 w-4 h-4 shrink-0 mt-0.5" /> : <AlertTriangleIcon className="text-yellow-500 w-4 h-4 shrink-0 mt-0.5" />}
+                                     <div>
+                                         <span className={check.pass ? 'text-gray-300' : 'text-yellow-300 font-bold'}>{check.name}</span>
+                                         {check.notes && <p className="text-gray-500 italic text-[11px]"> - {check.notes}</p>}
+                                     </div>
+                                 </div>
+                             ))}
+                         </div>
+                     </div>
+                     {/* Meaning Drift */}
+                     <div>
+                         <h4 className="font-bold text-gray-400 mb-2">Báo cáo rủi ro sai nghĩa (Meaning Drift)</h4>
+                         <div className="bg-gray-950/50 p-3 rounded-md space-y-3 text-xs max-h-80 overflow-y-auto custom-scrollbar">
+                             {result.meaning_drift_report.items.length > 0 ? (
+                                result.meaning_drift_report.items.map(item => (
+                                <div key={item.id} className={`p-2 rounded-md border ${getRiskColor(item.risk_level)}`}>
+                                    <div className="font-bold text-red-400">Risk {item.risk_level}: <span className="text-gray-300">{item.type}</span></div>
+                                    <p className="text-gray-400 mt-1"><b className="text-gray-300">Issue:</b> {item.issue}</p>
+                                    <p className="text-gray-400 mt-1"><b className="text-gray-300">Excerpt:</b> <i className="text-gray-500">"{item.draft_excerpt}"</i></p>
+                                    <p className="text-green-400 mt-1"><b className="text-green-300">Fix:</b> {item.suggested_fix}</p>
+                                </div>
+                                ))
+                             ) : <p className="text-gray-500 italic">Không phát hiện rủi ro sai nghĩa (mức ≥ 3).</p>}
+                         </div>
+                     </div>
+                 </div>
+            </details>
+        </div>
+    );
+};
+
 
 const ResultView = ({ 
     result, 
     isFinalizing, 
     onTriggerStep2,
     fileName,
-    step2Batches,
-    onRetryBatch,
-    onRetryAllFailedBatches
+    onTriggerStep3,
+    isStep3Running,
 }: { 
     result: TranscriptionOutput | null, 
     isFinalizing?: boolean,
     onTriggerStep2: () => void,
     fileName: string,
-    step2Batches: Batch[],
-    onRetryBatch: (id: string) => void,
-    onRetryAllFailedBatches: () => void
+    onTriggerStep3: () => void,
+    isStep3Running?: boolean,
 }) => {
     const [aiActionResult, setAiActionResult] = useState<{title: string, content: string} | null>(null);
     const [isAiActionLoading, setIsAiActionLoading] = useState(false);
@@ -792,11 +878,13 @@ const ResultView = ({
         );
     }, [result]);
 
-    if (!result) return <div className="flex items-center justify-center h-full text-gray-500 italic">No processing results yet.</div>;
+    if (!result) return <div className="flex items-center justify-center h-full text-gray-500 italic">Chưa có kết quả xử lý.</div>;
     
     const postEdit = result.post_edit_result;
+    const step3 = result.step3_result;
     const hasRawData = result.improved_transcript && result.improved_transcript.length > 0;
     const transcriptText = useMemo(() => {
+        if (step3?.final?.text) return step3.final.text;
         if (postEdit?.refined_script) {
             return postEdit.refined_script.map(item => `${item.speaker}: ${item.text}`).join('\n');
         }
@@ -833,25 +921,39 @@ const ResultView = ({
         downloadFile(textContent, 'text/plain', 'step2_refined.txt');
     };
 
-    const failedBatchCount = useMemo(() => step2Batches.filter(b => b.status === 'failed').length, [step2Batches]);
-
     return (
         <div className="space-y-6">
+             {/* --- TRIGGER BUTTONS --- */}
              {hasRawData && !postEdit && !isFinalizing && (
                  <div className="bg-blue-900/20 border border-blue-800 p-4 rounded-lg flex flex-col sm:flex-row items-center justify-between gap-4">
                      <div>
-                         <h4 className="font-bold text-blue-400">Raw data is ready ({result.improved_transcript.length} lines)</h4>
-                         <p className="text-xs text-gray-400">You can review the raw transcript below before proceeding.</p>
+                         <h4 className="font-bold text-blue-400">Dữ liệu thô sẵn sàng ({result.improved_transcript.length} dòng)</h4>
+                         <p className="text-xs text-gray-400">Bạn có thể kiểm tra kỹ bản thô bên dưới trước khi chạy tinh chỉnh.</p>
                      </div>
                      <button 
                         onClick={onTriggerStep2}
                         className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-sm flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"
                      >
-                         <PlayIcon /> Run Step 2 (Post-Edit)
+                         <PlayIcon /> Chạy Step 2 (Post-Edit)
                      </button>
                  </div>
              )}
+            {postEdit && !step3 && !isStep3Running && (
+                <div className="bg-indigo-900/20 border border-indigo-800 p-4 rounded-lg flex flex-col sm:flex-row items-center justify-between gap-4">
+                     <div>
+                         <h4 className="font-bold text-indigo-400">Script chuyên nghiệp (Step 2) sẵn sàng</h4>
+                         <p className="text-xs text-gray-400">Tiếp tục với Step 3 để tạo văn bản liên tục và chạy kiểm định chất lượng.</p>
+                     </div>
+                     <button 
+                        onClick={onTriggerStep3}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold text-sm flex items-center gap-2 transition-all shadow-lg shadow-indigo-900/20"
+                     >
+                         <BookOpenIcon /> Chạy Step 3 (Văn bản + Kiểm tra)
+                     </button>
+                 </div>
+            )}
             
+            {/* --- AI ACTIONS PANEL --- */}
             {transcriptText && (
                 <AiActionsPanel 
                     transcriptText={transcriptText}
@@ -865,7 +967,7 @@ const ResultView = ({
                      {isAiActionLoading ? (
                         <div className="flex items-center justify-center gap-3 text-violet-300 animate-pulse">
                             <LoaderIcon />
-                            <span>AI is analyzing...</span>
+                            <span>AI đang phân tích...</span>
                         </div>
                      ) : aiActionResult && (
                         <div>
@@ -875,35 +977,25 @@ const ResultView = ({
                      )}
                  </div>
             )}
-
-             {step2Batches.length > 0 && (
-                 <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700">
-                    <div className="flex items-center justify-between mb-2">
-                        <h3 className="font-bold text-purple-400 uppercase text-xs tracking-wider">Step 2 Batch Processing</h3>
-                        {failedBatchCount > 0 && (
-                            <button onClick={onRetryAllFailedBatches} className="text-red-400 hover:text-white bg-red-500/20 hover:bg-red-500/40 transition-colors flex items-center gap-2 text-xs font-bold px-3 py-1 rounded-md">
-                                <RefreshCwIcon /> Retry All ({failedBatchCount})
-                            </button>
-                        )}
-                    </div>
-                    <BatchGrid batches={step2Batches} onRetry={onRetryBatch} />
-                 </div>
-             )}
+            
+            {/* --- STEP 3: FINAL TEXT & REPORT --- */}
+            {step3 && <Step3Report result={step3} fileName={fileName} />}
 
 
-             <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 relative group">
-                <div className="flex items-center justify-between mb-2">
+             {/* --- STEP 2: PROFESSIONAL SCRIPT --- */}
+             <details className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 opacity-80 hover:opacity-100 transition-opacity" open={!step3}>
+                <summary className="flex items-center justify-between cursor-pointer">
                     <h3 className="font-bold text-teal-400 uppercase text-xs tracking-wider flex items-center gap-2">
-                        <span>Professional Lecture Script (Step 2)</span>
-                        {isFinalizing && <span className="animate-pulse text-purple-400 ml-2">- Generating...</span>}
+                        Script Bài Giảng Chuyên Nghiệp (Step 2)
+                        {isFinalizing && <span className="animate-pulse text-blue-400 ml-2">- Đang tạo...</span>}
                     </h3>
                     {postEdit && (
                          <button onClick={handleDownloadStep2} className="text-gray-500 hover:text-teal-400 transition-colors flex items-center gap-2 text-xs" title="Download as .txt">
-                            <DownloadIcon /> Download TXT
+                            <DownloadIcon /> Tải TXT
                         </button>
                     )}
-                </div>
-
+                </summary>
+                <div className="mt-3 pt-3 border-t border-gray-700/50">
                 {metrics && postEdit && (
                     <div className="text-xs font-mono text-gray-500 bg-gray-950/50 p-1.5 rounded-md mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
                         <span>S1 Words: <b className="text-gray-300">{metrics.step1WordCount}</b></span>
@@ -935,26 +1027,29 @@ const ResultView = ({
                             </div>
                         ))}
 
+                        {/* Audit Info */}
                         {metrics && <RemovalAuditReport metrics={metrics} />}
                         
                     </div>
                 ) : (
                     <div className="text-gray-500 text-sm italic py-4 text-center">
-                        {step2Batches.length > 0 ? "Processing batches..." : "Script will appear here after you run Step 2."}
+                        {isFinalizing ? "AI đang tổng hợp và tinh chỉnh kịch bản..." : "Script sẽ hiển thị tại đây sau khi bạn bấm 'Chạy Step 2'."}
                     </div>
                 )}
-            </div>
+                </div>
+            </details>
 
-            <details className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 opacity-80 hover:opacity-100 transition-opacity" open={!postEdit}>
+            {/* --- STEP 1: RAW TRANSCRIPT --- */}
+            <details className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 opacity-80 hover:opacity-100 transition-opacity">
                 <summary className="flex items-center justify-between cursor-pointer">
-                    <h3 className="font-bold text-blue-400 uppercase text-xs tracking-wider">Raw Transcript (Step 1 - Detailed)</h3>
+                    <h3 className="font-bold text-blue-400 uppercase text-xs tracking-wider">Bản ghi thô (Step 1 - Chi tiết)</h3>
                      {hasRawData && (
                         <div className="flex items-center gap-4">
                             {metrics && (
                                 <span className="text-xs font-mono text-gray-500">Words: <b className="text-gray-300">{metrics.step1WordCount}</b></span>
                             )}
                             <button onClick={handleDownloadStep1} className="text-gray-500 hover:text-blue-400 transition-colors flex items-center gap-2 text-xs" title="Download as .json">
-                                <DownloadIcon /> Download JSON
+                                <DownloadIcon /> Tải JSON
                             </button>
                         </div>
                     )}

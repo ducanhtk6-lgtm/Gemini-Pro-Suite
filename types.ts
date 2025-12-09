@@ -63,6 +63,73 @@ export interface PostEditResult {
     qa_audit: QAAudit;
 }
 
+// --- Step 3 Types (Continuous Text Generation & Audit) ---
+export interface Step3Paragraph {
+  id: string;                         // "P01", "P02"...
+  heading?: string | null;            // ý lớn (nếu có)
+  subheading?: string | null;         // ý nhỏ (nếu có)
+  text: string;                       // đoạn văn đã viết
+  source_timestamps: string[];        // truy vết: các timestamp từ Step 2
+  risk_level: 1 | 2 | 3 | 4 | 5;      // rủi ro sai nghĩa của đoạn
+  needs_review?: boolean | null;      // true nếu dựa trên input có needs_review
+}
+
+export type Step3DriftType =
+  | "number_unit"
+  | "negation"
+  | "laterality"
+  | "entity_term"
+  | "temporal"
+  | "causality"
+  | "uncertainty"
+  | "scope_overreach"
+  | "other";
+
+export interface Step3MeaningDriftItem {
+  id: string;                         // "D01"...
+  risk_level: 1 | 2 | 3 | 4 | 5;
+  type: Step3DriftType;
+  draft_excerpt: string;              // trích đoạn từ bản nháp
+  issue: string;                      // mô tả nguy cơ sai nghĩa
+  suggested_fix: string;              // gợi ý sửa
+  applied_fix?: string | null;        // đã áp dụng sửa gì
+  source_timestamps: string[];        // truy vết
+}
+
+export interface Step3VerificationCheck {
+  id: string;                         // "C01"...
+  name: string;                       // tên tiêu chí
+  pass: boolean;
+  notes?: string | null;
+}
+
+export interface Step3Result {
+  mode: string; // "STEP3_CONTINUOUS_TEXT_RESULT" | "..._FALLBACK"
+  draft: {
+    text: string;
+    paragraphs: Step3Paragraph[];
+  };
+  meaning_drift_report: {
+    scale_definition: string;         // định nghĩa thang 1–5
+    items: Step3MeaningDriftItem[];
+    summary: {
+      total: number;
+      max_risk: 1 | 2 | 3 | 4 | 5;
+      high_risk_count: number;        // count risk>=4
+    };
+  };
+  verification: {
+    overall_pass: boolean;
+    checks: Step3VerificationCheck[];
+    fixes_applied_count: number;
+    remaining_risks: string[];
+    notes: string;
+  };
+  final: {
+    text: string;                     // bản đã sửa (hoặc = draft nếu pass)
+  };
+}
+
 // --- Dashboard & Chunking Types ---
 
 export type ChunkStatus = 'pending' | 'processing' | 'completed' | 'failed';
@@ -76,19 +143,6 @@ export interface Chunk {
     endSec?: number; // Time-based end
     error?: string;
 }
-
-// --- New Types for Step 2 Batching ---
-export type BatchStatus = 'pending' | 'processing' | 'completed' | 'failed';
-
-export interface Batch {
-    id: string;
-    index: number;
-    items: Partial<ImprovedTranscriptItem>[]; // The actual data for the batch
-    status: BatchStatus;
-    result?: PostEditResult; // The successful result from this batch
-    error?: string;
-}
-
 
 export interface LogEntry {
     id: string;
@@ -113,6 +167,7 @@ export interface TranscriptionOutput {
     validation_and_conclusion: string; // Legacy / Fallback
     professional_medical_text: string; // Legacy / Fallback
     post_edit_result?: PostEditResult; // Step 2 Output
+    step3_result?: Step3Result; // Step 3 Output
 }
 
 // --- New Types for API Overload Recovery ---
