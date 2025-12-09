@@ -23,8 +23,8 @@ const MAX_INLINE_DATA_BYTES = 18 * 1024 * 1024; // 18MB safety margin for base64
 
 // --- Step 2 Robustness Constants ---
 const STEP2_TIMEOUT_MS = 300000; // 5 minutes
-const STEP2_TARGET_MAX_CHARS = 180000; // Target ~180k chars per batch
-const STEP2_MAX_ITEMS_PER_BATCH = 250;
+const STEP2_TARGET_MAX_CHARS = 80000; // Target ~80k chars per batch
+const STEP2_MAX_ITEMS_PER_BATCH = 50;
 const STEP2_MIN_SPLIT_ITEMS = 40; // Don't split batches smaller than this
 const STEP2_MAX_SPLIT_DEPTH = 6;
 const STEP2_MAX_RETRIES = 3;
@@ -564,7 +564,7 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
         } 
     }, [addLog, updateStats, modelStep1]);
 
-    // 4. STEP 2: POST-EDIT FINALIZATION (ROBUST VERSION)
+    // 4. STEP 2: POST-EDIT FINALIZATION (SMART FALLBACK VERSION)
     const performStep2Finalization = useCallback(async (mergedTranscript: ImprovedTranscriptItem[]) => {
         if (isFinalizing || !process.env.API_KEY) return;
         if (!mergedTranscript || mergedTranscript.length === 0) {
@@ -573,30 +573,99 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
         }
 
         setIsFinalizing(true);
-        addLog(`BẮT ĐẦU STEP 2: Tinh chỉnh văn bản (Post-Edit) bằng quy trình nâng cao...`, 'info');
+        addLog(`BẮT ĐẦU STEP 2: Tinh chỉnh văn bản (Post-Edit)...`, 'info');
 
         try {
             const slimTranscript = buildSlimTranscript(mergedTranscript);
+            // Sử dụng Constants đã được giảm nhỏ ở bước 1
             const batches = buildBatchesByCharOrCount(slimTranscript, STEP2_TARGET_MAX_CHARS, STEP2_MAX_ITEMS_PER_BATCH);
-            addLog(`Đã chia ${slimTranscript.length} items thành ${batches.length} batch để xử lý an toàn.`, 'info');
+            addLog(`Đã chia ${slimTranscript.length} items thành ${batches.length} batch nhỏ để tránh quá tải.`, 'info');
 
             const batchResults: PostEditResult[] = [];
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+            // Danh sách model dự phòng khi gặp lỗi 429
+            const fallbackModels = [modelStep2, 'gemini-2.5-pro', 'gemini-2.5-flash'];
+            // Loại bỏ trùng lặp nếu modelStep2 trùng với model trong danh sách
+            const uniqueModels = [...new Set(fallbackModels)];
+
             for (let i = 0; i < batches.length; i++) {
                 const batchItems = batches[i];
-                addLog(`Step 2: Đang xử lý Batch ${i + 1}/${batches.length} (${batchItems.length} items)...`, 'info');
+                let batchSuccess = false;
                 
-                const result = await runStep2Robust(ai, modelStep2, batchItems, addLog);
-                batchResults.push(result);
-                addLog(`Step 2: Hoàn thành Batch ${i + 1}/${batches.length}.`, 'success');
+                // Thử lần lượt các model
+                for (let m = 0; m < uniqueModels.length; m++) {
+                    const currentModel = uniqueModels[m];
+                    const isLastModel = m === uniqueModels.length - 1;
+
+                    addLog(`Step 2: Đang xử lý Batch ${i + 1}/${batches.length} với model ${currentModel}...`, 'info');
+
+                    try {
+                        const result = await runStep2Robust(ai, currentModel, batchItems, addLog);
+                        
+                        // Kiểm tra nếu kết quả trả về là Fallback do lỗi không phục hồi được (trừ 429 đã catch bên dưới)
+                        if (result.mode.includes("FALLBACK") && !result.mode.includes("BATCHED")) {
+                             // Nếu fallback nhưng không phải do 429, có thể chấp nhận hoặc thử model khác tùy logic, 
+                             // ở đây ta tạm chấp nhận để flow tiếp tục.
+                        }
+
+                        batchResults.push(result);
+                        batchSuccess = true;
+                        addLog(`Step 2: Hoàn thành Batch ${i + 1}/${batches.length}.`, 'success');
+                        
+                        // Nghỉ nhẹ 2s giữa các batch thành công để tránh spam
+                        await sleep(2000); 
+                        break; // Thành công thì thoát vòng lặp model, sang batch tiếp theo
+
+                    } catch (error: any) {
+                        const msg = error.message || String(error);
+                        const isRateLimit = msg.includes('429') || msg.includes('quota') || msg.includes('RESOURCE_EXHAUSTED');
+
+                        if (isRateLimit) {
+                            if (!isLastModel) {
+                                addLog(`Model ${currentModel} bị quá tải (429). Đang chuyển sang model nhẹ hơn: ${uniqueModels[m+1]}...`, 'warning');
+                                await sleep(1000); // Nghỉ 1s trước khi switch
+                                continue; // Thử model tiếp theo
+                            } else {
+                                // Nếu đây là model cuối cùng (Flash) mà vẫn lỗi -> Chờ 60s rồi thử lại chính nó
+                                addLog(`Tất cả model đều quá tải. Hệ thống sẽ tạm dừng 60s để hồi phục quota...`, 'error');
+                                setRateLimitEvent({
+                                    active: true,
+                                    step: 'STEP2',
+                                    message: "All models exhausted. Cooling down...",
+                                    lastModel: currentModel,
+                                    at: Date.now()
+                                });
+                                updateStats({ isCoolingDown: true, cooldownSeconds: 60 });
+                                await sleep(60000); // Chờ cứng 60s
+                                
+                                // Sau khi chờ, thử lại chính model này một lần nữa (bằng cách giảm index m đi 1 để vòng lặp lặp lại model này)
+                                addLog(`Hết thời gian chờ. Thử lại Batch ${i + 1} với ${currentModel}...`, 'info');
+                                m--; 
+                                continue;
+                            }
+                        } else {
+                            // Lỗi khác (không phải 429) -> Đã được handle trong runStep2Robust (trả về fallback), 
+                            // nhưng nếu nó throw ra đây nghĩa là lỗi nghiêm trọng.
+                            console.error("Critical Batch Error:", error);
+                            // Nếu lỗi không phải rate limit, ta chấp nhận dùng fallback của runStep2Robust 
+                            // (thực tế runStep2Robust không throw trừ khi crash, nó return fallback)
+                            break; 
+                        }
+                    }
+                }
+
+                if (!batchSuccess) {
+                     // Trường hợp cực đoan: batch này thất bại hoàn toàn dù đã đổi model
+                     addLog(`Batch ${i+1} thất bại hoàn toàn. Sử dụng dữ liệu gốc làm fallback.`, 'error');
+                     batchResults.push(buildStep2Fallback(batchItems, "ALL_MODELS_FAILED"));
+                }
             }
 
             const finalResult = mergePostEditResults(batchResults);
-            
             setResult(prev => prev ? { ...prev, post_edit_result: finalResult } : null);
 
-            // LOG METRICS FOR STEP 2
+            // LOG METRICS
             const s1Words = computeStep1WordCount(mergedTranscript);
             const s2Words = computeStep2WordCount(finalResult.refined_script);
             const delta = s2Words - s1Words;
@@ -606,22 +675,7 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
 
         } catch (error: any) {
             console.error("Step 2 Finalization Error:", error);
-            const msg = error.message || String(error);
-            const isRateLimit = msg.includes('429') || msg.includes('quota') || msg.includes('RESOURCE_EXHAUSTED');
-
-            if (isRateLimit) {
-                addLog(`Step 2 bị quá tải (429). Tạm dừng 60s...`, 'warning');
-                setRateLimitEvent({
-                    active: true,
-                    step: 'STEP2',
-                    message: msg,
-                    lastModel: modelStep2,
-                    at: Date.now()
-                });
-                updateStats({ isCoolingDown: true, cooldownSeconds: 60 });
-            } else {
-                addLog(`Lỗi không thể phục hồi ở Step 2: ${msg}. Vui lòng thử đổi model hoặc kiểm tra lại dữ liệu đầu vào.`, 'error');
-            }
+            addLog(`Lỗi không xác định ở Step 2: ${error.message}`, 'error');
         } finally {
             setIsFinalizing(false);
         }
