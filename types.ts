@@ -77,15 +77,15 @@ export interface Chunk {
     error?: string;
 }
 
-// --- NEW: Step 2 Batch Types ---
+// --- New Types for Step 2 Batching ---
 export type BatchStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
 export interface Batch {
     id: string;
     index: number;
-    items: Partial<ImprovedTranscriptItem>[];
+    items: Partial<ImprovedTranscriptItem>[]; // The actual data for the batch
     status: BatchStatus;
-    result?: PostEditResult;
+    result?: PostEditResult; // The successful result from this batch
     error?: string;
 }
 
