@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Chunk, LogEntry, ProcessingStats, TranscriptionOutput, ImprovedTranscriptItem, RateLimitEvent, RemovalAuditResult, DetailedRemovalRow } from '../types';
+import { Chunk, LogEntry, ProcessingStats, TranscriptionOutput, ImprovedTranscriptItem, RateLimitEvent, RemovalAuditResult, DetailedRemovalRow, Batch } from '../types';
 import { ActivityLog } from './ActivityLog';
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
 import { computeRemovalAudit } from '../utils/transcriptMetrics';
@@ -14,20 +14,25 @@ import { computeRemovalAudit } from '../utils/transcriptMetrics';
  */
 
 interface DashboardProps {
-    file: File | null; // Nullable for Manual Mode
+    file: File | null;
     onReset: () => void;
-    // Props từ hook useChunkProcessor
+    // Step 1 Props
     chunks: Chunk[];
     stats: ProcessingStats;
-    logs: LogEntry[];
-    result: TranscriptionOutput | null;
-    isFinalizing?: boolean; 
-    fileType: string;
     retryChunk: (id: string) => void;
     retryAllFailed: () => void;
+    // Step 2 Props
+    step2Batches: Batch[];
+    step2Stats: ProcessingStats;
+    isFinalizing?: boolean; 
     triggerStep2: () => void;
+    retryStep2Batch: (id: string) => void;
+    retryAllFailedStep2: () => void;
+    // Common Props
+    logs: LogEntry[];
+    result: TranscriptionOutput | null;
+    fileType: string;
     manualAppendTranscript: (json: string) => void;
-    // New Props for model switching
     step1Model: string;
     setStep1Model: (model: string) => void;
     step2Model: string;
@@ -71,8 +76,8 @@ const ApiOverloadRecoveryPanel = ({
     step2Model,
     setStep2Model,
     clearCooldownNow,
-    triggerStep2,
-    hasStep1Data
+    retryAllFailed,
+    retryAllFailedStep2
 }: {
     rateLimitEvent: RateLimitEvent,
     step1Model: string,
@@ -80,19 +85,18 @@ const ApiOverloadRecoveryPanel = ({
     step2Model: string,
     setStep2Model: (m: string) => void,
     clearCooldownNow: (reason: string) => void,
-    triggerStep2: () => void,
-    hasStep1Data: boolean
+    retryAllFailed: () => void,
+    retryAllFailedStep2: () => void,
 }) => {
     const isStep1 = rateLimitEvent.step === 'STEP1';
     const currentModel = isStep1 ? step1Model : step2Model;
     const [selectedModel, setSelectedModel] = useState(currentModel);
 
-    // Set a sensible default fallback model when the panel appears
     useEffect(() => {
         const lastFailedModel = rateLimitEvent.lastModel;
         if (lastFailedModel === 'gemini-2.5-pro') setSelectedModel('gemini-2.5-flash');
         else if (lastFailedModel === 'gemini-3-pro-preview') setSelectedModel('gemini-2.5-pro');
-        else setSelectedModel('gemini-2.5-pro'); // default for flash or anything else
+        else setSelectedModel('gemini-2.5-pro');
     }, [rateLimitEvent.lastModel]);
 
     const modelOptions = [
@@ -105,17 +109,14 @@ const ApiOverloadRecoveryPanel = ({
         if (isStep1) {
             setStep1Model(selectedModel);
             clearCooldownNow(`User switched Step 1 model to ${selectedModel}. Resuming now.`);
+            retryAllFailed(); // Automatically retry failed chunks with new model
         } else {
             setStep2Model(selectedModel);
-            clearCooldownNow(`User switched Step 2 model to ${selectedModel}. Retrying Step 2 now.`);
-            if (hasStep1Data) {
-                triggerStep2();
-            }
+            clearCooldownNow(`User switched Step 2 model to ${selectedModel}. Resuming now.`);
+            retryAllFailedStep2(); // Automatically retry failed batches
         }
     };
     
-    const isStep2ButtonDisabled = !isStep1 && !hasStep1Data;
-
     return (
         <div className="bg-orange-900/40 border border-orange-700/60 p-3 rounded-lg flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">
             <div className="flex-1">
@@ -134,11 +135,9 @@ const ApiOverloadRecoveryPanel = ({
                  </select>
                  <button 
                      onClick={handleApply}
-                     disabled={isStep2ButtonDisabled}
-                     title={isStep2ButtonDisabled ? "Không có dữ liệu Step 1 để chạy lại" : ""}
                      className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white rounded-lg font-bold text-sm flex items-center gap-2 transition-all shadow-lg shadow-orange-900/30 whitespace-nowrap disabled:bg-gray-600 disabled:cursor-not-allowed"
                  >
-                    <ZapIcon /> {isStep1 ? 'Tiếp tục' : 'Thử lại'}
+                    <ZapIcon /> Tiếp tục
                  </button>
             </div>
         </div>
@@ -148,82 +147,62 @@ const ApiOverloadRecoveryPanel = ({
 export const Dashboard: React.FC<DashboardProps> = ({
     file, onReset, chunks, stats, logs, result, fileType, retryChunk, retryAllFailed, isFinalizing, triggerStep2, manualAppendTranscript,
     step1Model, setStep1Model, step2Model, setStep2Model, rateLimitEvent, clearCooldownNow,
+    step2Batches, step2Stats, retryStep2Batch, retryAllFailedStep2
 }) => {
     const [elapsed, setElapsed] = useState(0);
-    // If file is null, default to 'input' tab. Else default to 'grid'.
     const [activeTab, setActiveTab] = useState<'grid' | 'text' | 'input'>(file ? 'grid' : 'input');
     
     // Manual Input States
     const [manualInput, setManualInput] = useState("");
-    const [inputType, setInputType] = useState<'json' | 'raw'>('json'); // 'json' or 'raw' (youtube text)
+    const [inputType, setInputType] = useState<'json' | 'raw'>('json');
     const isManualMode = !file;
     const hasStep1Data = !!result?.improved_transcript && result.improved_transcript.length > 0;
 
+    const processTime = stats.startTime > 0 ? stats : step2Stats;
 
     // Timer effect
     useEffect(() => {
-        if (stats.startTime > 0 && !stats.endTime) {
+        if (processTime.startTime > 0 && !processTime.endTime) {
             const timer = setInterval(() => {
-                setElapsed(Date.now() - stats.startTime);
+                setElapsed(Date.now() - processTime.startTime);
             }, 500);
             return () => clearInterval(timer);
-        } else if (stats.endTime && stats.startTime) {
-            setElapsed(stats.endTime - stats.startTime);
+        } else if (processTime.endTime && processTime.startTime) {
+            setElapsed(processTime.endTime - processTime.startTime);
         } else {
             setElapsed(0);
         }
-    }, [stats.startTime, stats.endTime]);
+    }, [processTime.startTime, processTime.endTime]);
 
     const progressPercentage = useMemo(() => {
         if (stats.total === 0) return 0;
         return (stats.completed / stats.total) * 100;
     }, [stats.total, stats.completed]);
 
-    // Auto-switch to text tab when done (Only in File Mode)
+    // Auto-switch to text tab when step 1 done (Only in File Mode)
     useEffect(() => {
         if (!isManualMode && stats.total > 0 && stats.completed === stats.total) {
             setActiveTab('text');
         }
     }, [stats.completed, stats.total, isManualMode]);
 
-    const parseRawTextToJSON = (rawText: string) => {
-        // Regex để tìm timestamp ở đầu dòng (Hỗ trợ 00:00, 0:00, [00:00], (00:00))
-        // Group 1: Timestamp string
-        // Group 2: Text content (optional)
+    const parseRawTextToJSON = (rawText: string): ImprovedTranscriptItem[] => {
         const lines = rawText.split('\n');
         const items: ImprovedTranscriptItem[] = [];
         const timestampRegex = /^(?:\[?\(?(\d{1,2}:\d{2}(?::\d{2})?)\)?\]?)\s*-?\s*(.*)/;
-
         lines.forEach(line => {
             const cleanLine = line.trim();
             if (!cleanLine) return;
-
             const match = cleanLine.match(timestampRegex);
             if (match) {
                 let ts = match[1];
                 let content = match[2].trim();
-                
-                // Chuẩn hóa timestamp thành dạng [MM:SS] hoặc [HH:MM:SS]
                 if (!ts.startsWith('[')) ts = `[${ts}]`;
-
-                // LUÔN LUÔN tạo item mới khi thấy timestamp, dù content có rỗng hay không
-                // (Vì nội dung có thể nằm ở dòng tiếp theo)
-                items.push({
-                    timestamp: ts,
-                    original: content,
-                    edited: content, 
-                    speaker: "[??]",
-                    uncertain: false
-                });
-            } else {
-                // Nếu dòng không có timestamp, nối vào item gần nhất
-                if (items.length > 0) {
-                    const lastItem = items[items.length - 1];
-                    // Thêm khoảng trắng nếu item trước đó đã có nội dung
-                    const separator = lastItem.original ? " " : "";
-                    lastItem.original += separator + cleanLine;
-                    lastItem.edited += separator + cleanLine;
-                }
+                items.push({ timestamp: ts, original: content, edited: content, speaker: "[??]", uncertain: false });
+            } else if (items.length > 0) {
+                const lastItem = items[items.length - 1];
+                lastItem.original += (lastItem.original ? " " : "") + cleanLine;
+                lastItem.edited += (lastItem.edited ? " " : "") + cleanLine;
             }
         });
         return items;
@@ -231,63 +210,44 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
     const handleManualAppend = () => {
         if (!manualInput.trim()) return;
-        
         try {
             if (inputType === 'json') {
                 manualAppendTranscript(manualInput);
             } else {
-                // Parse Raw Text -> JSON -> Append
                 const parsedItems = parseRawTextToJSON(manualInput);
                 if (parsedItems.length === 0) {
-                    alert("Không tìm thấy timestamp hợp lệ (VD: 00:00 hoặc 01:23). Vui lòng kiểm tra định dạng.");
+                    alert("Không tìm thấy timestamp hợp lệ (VD: 00:00).");
                     return;
                 }
-                const jsonString = JSON.stringify(parsedItems);
-                manualAppendTranscript(jsonString);
+                manualAppendTranscript(JSON.stringify(parsedItems));
             }
             setManualInput("");
-        } catch (e: any) {
-            alert("Lỗi dữ liệu: " + e.message);
-        }
+        } catch (e: any) { alert("Lỗi dữ liệu: " + e.message); }
     };
 
     return (
         <div className="w-full h-full flex flex-col gap-6 bg-gray-900 text-gray-100 p-4 rounded-xl">
             {/* 1) Top Stats Bar */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                <StatCard 
-                    icon={isManualMode ? <EditIcon /> : <FileTextIcon />} 
-                    label={isManualMode ? "Chế độ" : "Tài liệu"} 
-                    value={isManualMode ? "Manual Input" : file?.name} 
-                    subValue={isManualMode ? "Step 2 Post-Edit" : (file!.size / 1024 / 1024).toFixed(2) + " MB"} 
-                />
-                
+                <StatCard icon={isManualMode ? <EditIcon /> : <FileTextIcon />} label={isManualMode ? "Chế độ" : "Tài liệu"} value={isManualMode ? "Manual Input" : file?.name} subValue={isManualMode ? "Step 2 Post-Edit" : (file!.size / 1024 / 1024).toFixed(2) + " MB"} />
+                <StatCard icon={<ClockIcon />} label="Thời gian" value={formatDuration(elapsed)} subValue={processTime.endTime ? "Hoàn tất" : "Đang chạy..."} />
                 {isManualMode ? (
-                     <StatCard icon={<FileTextIcon />} label="Items đã nhập" value={(result?.improved_transcript?.length || 0).toString()} subValue="Dòng hội thoại" color="text-teal-400" />
+                    <StatCard icon={<CheckCircleIcon />} label="Items đã nhập" value={(result?.improved_transcript?.length || 0).toString()} subValue="Dòng hội thoại" color="text-teal-400" />
                 ) : (
                     <>
-                        <StatCard icon={<ClockIcon />} label="Thời gian" value={formatDuration(elapsed)} subValue={stats.endTime ? "Hoàn tất" : "Đang chạy..."} />
-                        <StatCard icon={<CheckCircleIcon />} label="Hoàn thành" value={`${stats.completed}/${stats.total}`} color="text-green-400" />
-                        <StatCard icon={<LoaderIcon />} label="Đang xử lý" value={stats.processing.toString()} color="text-blue-400" />
+                        <StatCard icon={<CheckCircleIcon />} label="Hoàn thành (S1)" value={`${stats.completed}/${stats.total}`} color="text-green-400" />
+                        <StatCard icon={<LoaderIcon />} label="Đang xử lý (S1)" value={stats.processing.toString()} color="text-blue-400" />
                     </>
                 )}
-                
                 <div className="bg-gray-800 p-3 rounded-lg border border-gray-700 flex flex-col justify-between">
                     <div className="flex items-center gap-2 text-gray-400 text-xs uppercase font-bold tracking-wider">
                         <AlertTriangleIcon /> <span>Thất bại</span>
                     </div>
                     <div className="flex justify-between items-end mt-1">
-                        <span className={`text-xl font-mono font-bold ${stats.failed > 0 ? 'text-red-400' : 'text-gray-500'}`}>{stats.failed}</span>
-                        {!isManualMode && (
-                            <button 
-                                onClick={retryAllFailed}
-                                disabled={stats.failed === 0}
-                                className={`p-1 rounded transition-colors ${stats.failed > 0 ? 'bg-red-500/20 text-red-400 hover:bg-red-500/40' : 'text-gray-600 cursor-not-allowed'}`}
-                                title="Retry all failed"
-                            >
-                                <RefreshCwIcon />
-                            </button>
-                        )}
+                        <span className={`text-xl font-mono font-bold ${(stats.failed > 0 || step2Stats.failed > 0) ? 'text-red-400' : 'text-gray-500'}`}>{stats.failed + step2Stats.failed}</span>
+                        <button onClick={isManualMode ? retryAllFailedStep2 : retryAllFailed} disabled={stats.failed === 0 && step2Stats.failed === 0} className={`p-1 rounded transition-colors ${(stats.failed > 0 || step2Stats.failed > 0) ? 'bg-red-500/20 text-red-400 hover:bg-red-500/40' : 'text-gray-600 cursor-not-allowed'}`} title="Retry all failed">
+                            <RefreshCwIcon />
+                        </button>
                     </div>
                 </div>
             </div>
@@ -295,184 +255,54 @@ export const Dashboard: React.FC<DashboardProps> = ({
             {/* 2) Progress Bar (Only in File Mode) */}
             {!isManualMode && (
                 <div className="relative w-full">
-                    <div className="flex justify-between mb-1 text-xs font-medium text-gray-400">
-                        <span>Tiến độ xử lý (Step 1)</span>
-                        <span>{Math.round(progressPercentage)}%</span>
-                    </div>
-                    <div className={`w-full bg-gray-700 rounded-full h-2.5 overflow-hidden ${stats.isCoolingDown ? 'opacity-60 grayscale' : ''}`}>
-                        <div 
-                            className="bg-blue-500 h-2.5 rounded-full transition-all duration-500 ease-out" 
-                            style={{ width: `${progressPercentage}%` }}
-                        ></div>
-                    </div>
+                    <div className="flex justify-between mb-1 text-xs font-medium text-gray-400"><span>Tiến độ xử lý (Step 1)</span><span>{Math.round(progressPercentage)}%</span></div>
+                    <div className={`w-full bg-gray-700 rounded-full h-2.5 overflow-hidden ${stats.isCoolingDown ? 'opacity-60 grayscale' : ''}`}><div className="bg-blue-500 h-2.5 rounded-full transition-all duration-500 ease-out" style={{ width: `${progressPercentage}%` }}></div></div>
                 </div>
             )}
             
-            {/* Step 2 Loading Indicator (Common) */}
             {isFinalizing && (
-                <div className="w-full bg-blue-900/20 border border-blue-800 p-3 rounded flex items-center justify-center gap-3 animate-pulse">
-                    <LoaderIcon />
-                    <span className="text-blue-300 font-bold">Đang chạy Step 2: Tinh chỉnh và tạo script chuyên nghiệp...</span>
-                </div>
+                <div className="w-full bg-blue-900/20 border border-blue-800 p-3 rounded flex items-center justify-center gap-3 animate-pulse"><LoaderIcon /><span className="text-blue-300 font-bold">Đang chạy Step 2: Tinh chỉnh và tạo script chuyên nghiệp... ({step2Stats.completed}/{step2Stats.total})</span></div>
             )}
 
-            {/* 3) Cooldown Alert */}
-            {stats.isCoolingDown && !rateLimitEvent?.active && (
-                <div className="bg-yellow-900/30 border border-yellow-700/50 text-yellow-200 px-4 py-2 rounded-lg flex items-center justify-between animate-pulse">
-                    <div className="flex items-center gap-2">
-                        <ClockIcon />
-                        <span className="text-sm font-medium">Hệ thống đang nghỉ (Cooldown) để tránh Rate Limit</span>
-                    </div>
-                    <span className="font-mono font-bold">{formatDuration(stats.cooldownSeconds * 1000)}</span>
-                </div>
+            {(stats.isCoolingDown || step2Stats.isCoolingDown) && (
+                rateLimitEvent?.active ? (
+                    <ApiOverloadRecoveryPanel rateLimitEvent={rateLimitEvent} step1Model={step1Model} setStep1Model={setStep1Model} step2Model={step2Model} setStep2Model={setStep2Model} clearCooldownNow={clearCooldownNow} retryAllFailed={retryAllFailed} retryAllFailedStep2={retryAllFailedStep2}/>
+                ) : (
+                    <div className="bg-yellow-900/30 border border-yellow-700/50 text-yellow-200 px-4 py-2 rounded-lg flex items-center justify-between animate-pulse"><div className="flex items-center gap-2"><ClockIcon /><span className="text-sm font-medium">Hệ thống đang nghỉ (Cooldown)</span></div><span className="font-mono font-bold">{formatDuration((stats.cooldownSeconds || step2Stats.cooldownSeconds) * 1000)}</span></div>
+                )
             )}
-
-            {/* NEW: API Overload Recovery Panel */}
-            {stats.isCoolingDown && rateLimitEvent?.active && (
-                <ApiOverloadRecoveryPanel
-                    rateLimitEvent={rateLimitEvent}
-                    step1Model={step1Model}
-                    setStep1Model={setStep1Model}
-                    step2Model={step2Model}
-                    setStep2Model={setStep2Model}
-                    clearCooldownNow={clearCooldownNow}
-                    triggerStep2={triggerStep2}
-                    hasStep1Data={hasStep1Data}
-                />
-            )}
-
 
             {/* Main Content Area */}
             <div className="flex flex-col lg:flex-row gap-6 h-[600px] mt-2">
-                {/* Left Column: Tabs & Content */}
                 <div className="flex-1 flex flex-col bg-gray-800/50 rounded-lg border border-gray-700 overflow-hidden">
-                    {/* Tabs */}
                     <div className="flex border-b border-gray-700">
-                        {isManualMode && (
-                            <button 
-                                onClick={() => setActiveTab('input')}
-                                className={`flex-1 py-3 text-sm font-medium text-center transition-colors ${activeTab === 'input' ? 'bg-gray-700 text-teal-300 border-b-2 border-teal-400' : 'text-gray-400 hover:bg-gray-700/50'}`}
-                            >
-                                Input Data
-                            </button>
+                        {isManualMode ? (
+                            <button onClick={() => setActiveTab('input')} className={`flex-1 py-3 text-sm font-medium text-center transition-colors ${activeTab === 'input' ? 'bg-gray-700 text-teal-300 border-b-2 border-teal-400' : 'text-gray-400 hover:bg-gray-700/50'}`}>Input Data</button>
+                        ) : (
+                            <button onClick={() => setActiveTab('grid')} className={`flex-1 py-3 text-sm font-medium text-center transition-colors ${activeTab === 'grid' ? 'bg-gray-700 text-blue-300 border-b-2 border-blue-400' : 'text-gray-400 hover:bg-gray-700/50'}`}>Lưới phân đoạn</button>
                         )}
-                        {!isManualMode && (
-                            <button 
-                                onClick={() => setActiveTab('grid')}
-                                className={`flex-1 py-3 text-sm font-medium text-center transition-colors ${activeTab === 'grid' ? 'bg-gray-700 text-blue-300 border-b-2 border-blue-400' : 'text-gray-400 hover:bg-gray-700/50'}`}
-                            >
-                                Lưới phân đoạn
-                            </button>
-                        )}
-                        <button 
-                            onClick={() => setActiveTab('text')}
-                            className={`flex-1 py-3 text-sm font-medium text-center transition-colors ${activeTab === 'text' ? 'bg-gray-700 text-teal-300 border-b-2 border-teal-400' : 'text-gray-400 hover:bg-gray-700/50'}`}
-                        >
-                            Kết quả (Step 1 & 2)
-                        </button>
+                        <button onClick={() => setActiveTab('text')} className={`flex-1 py-3 text-sm font-medium text-center transition-colors ${activeTab === 'text' ? 'bg-gray-700 text-teal-300 border-b-2 border-teal-400' : 'text-gray-400 hover:bg-gray-700/50'}`}>Kết quả (Step 1 & 2)</button>
                     </div>
 
-                    {/* Tab Content */}
                     <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                        {activeTab === 'grid' && !isManualMode && (
-                            <ChunkGrid chunks={chunks} onRetry={retryChunk} />
-                        )}
-                        
+                        {activeTab === 'grid' && !isManualMode && <ChunkGrid chunks={chunks} onRetry={retryChunk} />}
                         {activeTab === 'input' && isManualMode && (
                             <div className="flex flex-col h-full gap-4">
                                 <div className="flex flex-col gap-2 h-full">
-                                    <div className="flex justify-between items-center">
-                                         <label className="text-xs font-bold text-gray-400 uppercase">Dữ liệu đầu vào</label>
-                                         <div className="flex bg-gray-900 rounded-lg p-1 border border-gray-700">
-                                            <button 
-                                                onClick={() => setInputType('json')}
-                                                className={`px-3 py-1 rounded text-xs font-bold flex items-center gap-2 transition-all ${inputType === 'json' ? 'bg-teal-700 text-white' : 'text-gray-400 hover:text-white'}`}
-                                            >
-                                                <CodeIcon /> JSON
-                                            </button>
-                                            <button 
-                                                onClick={() => setInputType('raw')}
-                                                className={`px-3 py-1 rounded text-xs font-bold flex items-center gap-2 transition-all ${inputType === 'raw' ? 'bg-red-700 text-white' : 'text-gray-400 hover:text-white'}`}
-                                            >
-                                                <YoutubeIcon /> YouTube / Raw Text
-                                            </button>
-                                         </div>
-                                    </div>
-
-                                    <textarea 
-                                        className="w-full flex-1 min-h-[150px] bg-gray-900 border border-gray-700 rounded p-3 text-xs font-mono text-gray-300 focus:outline-none focus:border-teal-500 transition-colors"
-                                        placeholder={inputType === 'json' 
-                                            ? '[ { "timestamp": "...", "original": "...", "edited": "..." }, ... ]' 
-                                            : "00:00 Xin chào các bạn\n00:05 Hôm nay chúng ta sẽ học bài mới..."}
-                                        value={manualInput}
-                                        onChange={(e) => setManualInput(e.target.value)}
-                                    />
-                                    <div className="flex justify-between items-center mt-2">
-                                        <div className="text-[10px] text-gray-500 italic">
-                                            {inputType === 'raw' 
-                                                ? "Tự động phát hiện timestamp (VD: 00:00, [12:30]) và chuyển đổi sang format ứng dụng."
-                                                : "Dán trực tiếp mảng JSON ImprovedTranscriptItem[]."
-                                            }
-                                        </div>
-                                        <button 
-                                            onClick={handleManualAppend}
-                                            className="px-4 py-2 bg-teal-700 hover:bg-teal-600 text-white text-sm rounded-lg font-bold flex items-center gap-2 shadow-lg"
-                                        >
-                                            <PlusCircleIcon /> 
-                                            {inputType === 'raw' ? "Chuyển đổi & Thêm" : "Nối thêm dữ liệu"}
-                                        </button>
-                                    </div>
-
-                                    {/* Preview List */}
-                                    <div className="border-t border-gray-700 pt-4 flex-1 flex flex-col overflow-hidden mt-2">
-                                        <h4 className="text-xs font-bold text-gray-400 mb-2 uppercase">Dữ liệu hiện có trong bộ nhớ ({result?.improved_transcript?.length || 0} dòng)</h4>
-                                        <div className="flex-1 overflow-y-auto bg-gray-900/50 rounded p-2 border border-gray-800 custom-scrollbar">
-                                            {result?.improved_transcript && result.improved_transcript.length > 0 ? (
-                                                <RawTranscriptView items={result.improved_transcript} />
-                                            ) : (
-                                                <div className="text-gray-600 text-center italic mt-10">Chưa có dữ liệu.</div>
-                                            )}
-                                        </div>
-                                    </div>
+                                    <div className="flex justify-between items-center"><label className="text-xs font-bold text-gray-400 uppercase">Dữ liệu đầu vào</label><div className="flex bg-gray-900 rounded-lg p-1 border border-gray-700"><button onClick={() => setInputType('json')} className={`px-3 py-1 rounded text-xs font-bold flex items-center gap-2 transition-all ${inputType === 'json' ? 'bg-teal-700 text-white' : 'text-gray-400 hover:text-white'}`}><CodeIcon /> JSON</button><button onClick={() => setInputType('raw')} className={`px-3 py-1 rounded text-xs font-bold flex items-center gap-2 transition-all ${inputType === 'raw' ? 'bg-red-700 text-white' : 'text-gray-400 hover:text-white'}`}><YoutubeIcon /> YouTube / Raw Text</button></div></div>
+                                    <textarea className="w-full flex-1 min-h-[150px] bg-gray-900 border border-gray-700 rounded p-3 text-xs font-mono text-gray-300 focus:outline-none focus:border-teal-500 transition-colors" placeholder={inputType === 'json' ? '[ { "timestamp": "...", "original": "...", "edited": "..." }, ... ]' : "00:00 Xin chào các bạn\n00:05 Hôm nay chúng ta sẽ học bài mới..."} value={manualInput} onChange={(e) => setManualInput(e.target.value)} />
+                                    <div className="flex justify-between items-center mt-2"><div className="text-[10px] text-gray-500 italic">{inputType === 'raw' ? "Tự động phát hiện timestamp (VD: 00:00) và chuyển đổi." : "Dán trực tiếp mảng JSON ImprovedTranscriptItem[]."}</div><button onClick={handleManualAppend} className="px-4 py-2 bg-teal-700 hover:bg-teal-600 text-white text-sm rounded-lg font-bold flex items-center gap-2 shadow-lg"><PlusCircleIcon /> {inputType === 'raw' ? "Chuyển đổi & Thêm" : "Nối thêm dữ liệu"}</button></div>
+                                    <div className="border-t border-gray-700 pt-4 flex-1 flex flex-col overflow-hidden mt-2"><h4 className="text-xs font-bold text-gray-400 mb-2 uppercase">Dữ liệu hiện có ({result?.improved_transcript?.length || 0} dòng)</h4><div className="flex-1 overflow-y-auto bg-gray-900/50 rounded p-2 border border-gray-800 custom-scrollbar">{result?.improved_transcript && result.improved_transcript.length > 0 ? <RawTranscriptView items={result.improved_transcript} /> : <div className="text-gray-600 text-center italic mt-10">Chưa có dữ liệu.</div>}</div></div>
                                 </div>
                             </div>
                         )}
-
-                        {activeTab === 'text' && (
-                            <ResultView 
-                                result={result} 
-                                isFinalizing={isFinalizing} 
-                                onTriggerStep2={triggerStep2}
-                                fileName={file?.name || 'manual_transcript'}
-                            />
-                        )}
+                        {activeTab === 'text' && <ResultView result={result} isFinalizing={isFinalizing} onTriggerStep2={triggerStep2} fileName={file?.name || 'manual_transcript'} step2Batches={step2Batches} onRetryBatch={retryStep2Batch} />}
                     </div>
                 </div>
-
-                {/* Right Column: Activity Log & Actions */}
                 <div className="w-full lg:w-80 flex flex-col gap-4">
-                    <div className="flex-1 overflow-hidden rounded-lg">
-                        <ActivityLog logs={logs} />
-                    </div>
-                    
-                    {/* Manual Trigger for Step 2 */}
-                    {isManualMode && result?.improved_transcript && result.improved_transcript.length > 0 && !result.post_edit_result && (
-                         <button 
-                            onClick={triggerStep2}
-                            disabled={isFinalizing}
-                            className="w-full py-4 bg-teal-600 hover:bg-teal-500 text-white rounded-lg transition-colors font-bold shadow-lg shadow-teal-900/20 flex items-center justify-center gap-2"
-                        >
-                            {isFinalizing ? <LoaderIcon /> : <PlayIcon />}
-                            CHẠY STEP 2 (POST-EDIT)
-                        </button>
-                    )}
-
-                    <button 
-                        onClick={onReset}
-                        className="w-full py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors font-medium border border-gray-600 hover:border-gray-500"
-                    >
-                        {isManualMode ? "Thoát Manual Mode" : "Bắt đầu công việc mới"}
-                    </button>
+                    <div className="flex-1 overflow-hidden rounded-lg"><ActivityLog logs={logs} /></div>
+                    {isManualMode && result?.improved_transcript && result.improved_transcript.length > 0 && !result.post_edit_result && (<button onClick={triggerStep2} disabled={isFinalizing} className="w-full py-4 bg-teal-600 hover:bg-teal-500 text-white rounded-lg transition-colors font-bold shadow-lg shadow-teal-900/20 flex items-center justify-center gap-2">{isFinalizing ? <LoaderIcon /> : <PlayIcon />} CHẠY STEP 2 (POST-EDIT)</button>)}
+                    <button onClick={onReset} className="w-full py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors font-medium border border-gray-600 hover:border-gray-500">{isManualMode ? "Thoát Manual Mode" : "Bắt đầu công việc mới"}</button>
                 </div>
             </div>
         </div>
@@ -482,432 +312,94 @@ export const Dashboard: React.FC<DashboardProps> = ({
 // --- Sub Components ---
 
 const StatCard = ({ icon, label, value, subValue, color = "text-gray-200" }: any) => (
-    <div className="bg-gray-800 p-3 rounded-lg border border-gray-700 flex flex-col justify-between overflow-hidden">
-        <div className="flex items-center gap-2 text-gray-400 text-xs uppercase font-bold tracking-wider truncate">
-            {icon} <span>{label}</span>
-        </div>
-        <div className="mt-2">
-            <div className={`text-xl font-mono font-bold truncate ${color}`}>{value}</div>
-            {subValue && <div className="text-xs text-gray-500 truncate" title={subValue}>{subValue}</div>}
-        </div>
-    </div>
+    <div className="bg-gray-800 p-3 rounded-lg border border-gray-700 flex flex-col justify-between overflow-hidden"><div className="flex items-center gap-2 text-gray-400 text-xs uppercase font-bold tracking-wider truncate">{icon} <span>{label}</span></div><div className="mt-2"><div className={`text-xl font-mono font-bold truncate ${color}`}>{value}</div>{subValue && <div className="text-xs text-gray-500 truncate" title={subValue}>{subValue}</div>}</div></div>
 );
 
 const ChunkGrid = ({ chunks, onRetry }: { chunks: Chunk[], onRetry: (id: string) => void }) => {
     if (chunks.length === 0) return <div className="flex items-center justify-center h-full text-gray-500 italic">Đang khởi tạo danh sách...</div>;
+    return <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">{chunks.map((chunk) => (<div key={chunk.id} className={`aspect-square rounded border flex items-center justify-center text-xs font-mono cursor-default relative group ${chunk.status === 'completed' ? 'bg-green-900/30 border-green-700 text-green-400' : chunk.status === 'processing' ? 'bg-blue-900/30 border-blue-700 text-blue-400 animate-pulse' : chunk.status === 'failed' ? 'bg-red-900/30 border-red-700 text-red-400 cursor-pointer hover:bg-red-900/50' : 'bg-gray-800 border-gray-700 text-gray-500'}`} onClick={() => chunk.status === 'failed' && onRetry(chunk.id)} title={`Chunk #${chunk.index} - ${chunk.status}${chunk.error ? ': ' + chunk.error : ''}`}>{chunk.index + 1}{chunk.status === 'failed' && (<div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded"><RefreshCwIcon /></div>)}</div>))}</div>;
+};
 
-    return (
-        <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">
-            {chunks.map((chunk) => (
-                <div 
-                    key={chunk.id}
-                    className={`
-                        aspect-square rounded border flex items-center justify-center text-xs font-mono cursor-default relative group
-                        ${chunk.status === 'completed' ? 'bg-green-900/30 border-green-700 text-green-400' : 
-                          chunk.status === 'processing' ? 'bg-blue-900/30 border-blue-700 text-blue-400 animate-pulse' :
-                          chunk.status === 'failed' ? 'bg-red-900/30 border-red-700 text-red-400 cursor-pointer hover:bg-red-900/50' :
-                          'bg-gray-800 border-gray-700 text-gray-500'}
-                    `}
-                    onClick={() => chunk.status === 'failed' && onRetry(chunk.id)}
-                    title={`Chunk #${chunk.index} - ${chunk.status}${chunk.error ? ': ' + chunk.error : ''}`}
-                >
-                    {chunk.index + 1}
-                    {chunk.status === 'failed' && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded">
-                            <RefreshCwIcon />
-                        </div>
-                    )}
-                </div>
-            ))}
-        </div>
-    );
+// NEW: BatchGrid Component for Step 2
+const BatchGrid = ({ batches, onRetry }: { batches: Batch[], onRetry: (id: string) => void }) => {
+    if (batches.length === 0) return null;
+    return <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">{batches.map((batch) => (<div key={batch.id} className={`aspect-square rounded border flex items-center justify-center text-xs font-mono cursor-default relative group ${batch.status === 'completed' ? 'bg-teal-900/40 border-teal-700 text-teal-400' : batch.status === 'processing' ? 'bg-purple-900/40 border-purple-700 text-purple-400 animate-pulse' : batch.status === 'failed' ? 'bg-red-900/30 border-red-700 text-red-400 cursor-pointer hover:bg-red-900/50' : 'bg-gray-800 border-gray-700 text-gray-500'}`} onClick={() => batch.status === 'failed' && onRetry(batch.id)} title={`Batch #${batch.index} - ${batch.status}${batch.error ? ': ' + batch.error : ''}`}>{batch.index + 1}{batch.status === 'failed' && (<div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded"><RefreshCwIcon /></div>)}</div>))}</div>;
 };
 
 const RawTranscriptView = ({ items }: { items: ImprovedTranscriptItem[] }) => {
      const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-
-    const handleCopy = (text: string, index: number) => {
-        navigator.clipboard.writeText(text);
-        setCopiedIndex(index);
-        setTimeout(() => setCopiedIndex(null), 1500);
-    };
-
-    return (
-        <div className="space-y-2 font-mono text-xs pr-2">
-            {items.map((item, idx) => {
-                let speakerLabel = item.speaker || "??";
-                let speakerColor = "bg-gray-700 text-gray-300";
-                if (speakerLabel.includes("GV")) speakerColor = "bg-blue-900/50 text-blue-300 border border-blue-800";
-                else if (speakerLabel.includes("SV")) speakerColor = "bg-purple-900/50 text-purple-300 border border-purple-800";
-                
-                return (
-                    <div key={idx} className={`flex gap-3 items-baseline group ${item.uncertain ? 'opacity-60' : ''}`}>
-                        <span className="text-teal-600 w-[50px] shrink-0 text-right">{item.timestamp}</span>
-                        <span className={`px-1 rounded text-[9px] font-bold uppercase w-[30px] text-center ${speakerColor}`}>
-                            {speakerLabel.replace(/[\[\]]/g,'')}
-                        </span>
-                        <span className="text-gray-400 flex-1">{item.edited}</span>
-                        <button 
-                            onClick={() => handleCopy(item.edited, idx)}
-                            className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-white transition-opacity p-1 rounded"
-                        >
-                            {copiedIndex === idx ? <CheckCircleIcon /> : <CopyIcon />}
-                        </button>
-                    </div>
-                );
-            })}
-        </div>
-    )
+    const handleCopy = (text: string, index: number) => { navigator.clipboard.writeText(text); setCopiedIndex(index); setTimeout(() => setCopiedIndex(null), 1500); };
+    return <div className="space-y-2 font-mono text-xs pr-2">{items.map((item, idx) => { let speakerLabel = item.speaker || "??"; let speakerColor = "bg-gray-700 text-gray-300"; if (speakerLabel.includes("GV")) speakerColor = "bg-blue-900/50 text-blue-300 border border-blue-800"; else if (speakerLabel.includes("SV")) speakerColor = "bg-purple-900/50 text-purple-300 border border-purple-800"; return <div key={idx} className={`flex gap-3 items-baseline group ${item.uncertain ? 'opacity-60' : ''}`}><span className="text-teal-600 w-[50px] shrink-0 text-right">{item.timestamp}</span><span className={`px-1 rounded text-[9px] font-bold uppercase w-[30px] text-center ${speakerColor}`}>{speakerLabel.replace(/[\[\]]/g,'')}</span><span className="text-gray-400 flex-1">{item.edited}</span><button onClick={() => handleCopy(item.edited, idx)} className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-white transition-opacity p-1 rounded">{copiedIndex === idx ? <CheckCircleIcon /> : <CopyIcon />}</button></div>; })}</div>;
 }
 
 type AiAction = 'summarize' | 'key-points' | 'titles' | 'deep-analysis';
-
 const AiActionsPanel = ({ transcriptText, onResult, onLoadingChange }: { transcriptText: string, onResult: (title: string, content: string) => void, onLoadingChange: (isLoading: boolean) => void }) => {
-    
     const handleAction = async (action: AiAction) => {
         if (!transcriptText) return;
-
         onLoadingChange(true);
-        let prompt = '';
-        let model = 'gemini-2.5-flash';
-        let config: any = {};
-        let title = '';
-
+        let prompt = '', model = 'gemini-2.5-flash', config: any = {}, title = '';
         switch(action) {
-            case 'summarize':
-                title = 'Tóm tắt nội dung';
-                prompt = `Tóm tắt bài giảng y khoa sau đây thành một đoạn văn ngắn gọn, súc tích, tập trung vào các ý chính và kết luận quan trọng:\n\n---\n\n${transcriptText}`;
-                break;
-            case 'key-points':
-                title = 'Các điểm chính';
-                prompt = `Liệt kê các điểm chính (key points) quan trọng nhất từ bài giảng y khoa sau. Trình bày dưới dạng gạch đầu dòng:\n\n---\n\n${transcriptText}`;
-                break;
-            case 'titles':
-                title = 'Đề xuất tiêu đề';
-                prompt = `Dựa vào nội dung bài giảng y khoa sau, hãy đề xuất 5 tiêu đề hấp dẫn và phù hợp:\n\n---\n\n${transcriptText}`;
-                break;
-            case 'deep-analysis':
-                title = 'Phân tích chuyên sâu (Thinking Mode)';
-                model = 'gemini-3-pro-preview';
-                config = { thinkingConfig: { thinkingBudget: 32768 } };
-                prompt = `Thực hiện phân tích chuyên sâu bài giảng y khoa sau. Tập trung vào việc xác định các khái niệm phức tạp, mối liên hệ giữa các ý, các điểm có thể gây nhầm lẫn và đề xuất các chủ đề liên quan để nghiên cứu thêm. Trình bày kết quả một cách có cấu trúc rõ ràng:\n\n---\n\n${transcriptText}`;
-                break;
+            case 'summarize': title = 'Tóm tắt nội dung'; prompt = `Tóm tắt bài giảng y khoa sau đây thành một đoạn văn ngắn gọn, súc tích:\n\n---\n\n${transcriptText}`; break;
+            case 'key-points': title = 'Các điểm chính'; prompt = `Liệt kê các điểm chính quan trọng nhất từ bài giảng y khoa sau. Trình bày dưới dạng gạch đầu dòng:\n\n---\n\n${transcriptText}`; break;
+            case 'titles': title = 'Đề xuất tiêu đề'; prompt = `Dựa vào nội dung bài giảng y khoa sau, hãy đề xuất 5 tiêu đề hấp dẫn và phù hợp:\n\n---\n\n${transcriptText}`; break;
+            case 'deep-analysis': title = 'Phân tích chuyên sâu'; model = 'gemini-3-pro-preview'; config = { thinkingConfig: { thinkingBudget: 32768 } }; prompt = `Thực hiện phân tích chuyên sâu bài giảng y khoa sau. Tập trung vào việc xác định các khái niệm phức tạp, mối liên hệ giữa các ý, và đề xuất các chủ đề liên quan để nghiên cứu thêm:\n\n---\n\n${transcriptText}`; break;
         }
-
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-            // FIX: `safetySettings` must be a property of the `config` object.
             const response = await ai.models.generateContent({
-                model,
-                contents: prompt,
+                model, contents: prompt,
                 config: {
                     ...config,
-                    safetySettings: [
-                        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-                        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    ],
+                    safetySettings: Object.values(HarmCategory).map(category => ({ category, threshold: HarmBlockThreshold.BLOCK_NONE })),
                 },
             });
             onResult(title, response.text || 'Không có phản hồi.');
-        } catch (error: any) {
-            console.error(`AI Action (${action}) failed:`, error);
-            onResult(`Lỗi khi ${title}`, error.message || 'An unknown error occurred.');
-        } finally {
-            onLoadingChange(false);
-        }
+        } catch (error: any) { onResult(`Lỗi khi ${title}`, error.message || 'Lỗi không xác định.'); } finally { onLoadingChange(false); }
     };
-
-    return (
-        <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700">
-             <h3 className="font-bold text-violet-400 uppercase text-xs tracking-wider flex items-center gap-2 mb-3">
-                <SparklesIcon />
-                <span>AI Actions</span>
-            </h3>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                <button onClick={() => handleAction('summarize')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Tóm tắt</button>
-                <button onClick={() => handleAction('key-points')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Điểm chính</button>
-                <button onClick={() => handleAction('titles')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Tiêu đề</button>
-                 <button onClick={() => handleAction('deep-analysis')} className="px-3 py-2 bg-violet-800 hover:bg-violet-700 text-white text-xs rounded font-bold transition-colors flex items-center justify-center gap-1.5" title="Sử dụng Gemini 3 Pro với Thinking Mode">
-                    <BrainCircuitIcon /> Phân tích sâu
-                </button>
-            </div>
-        </div>
-    );
+    return <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700"><h3 className="font-bold text-violet-400 uppercase text-xs tracking-wider flex items-center gap-2 mb-3"><SparklesIcon /><span>AI Actions</span></h3><div className="grid grid-cols-2 lg:grid-cols-4 gap-2"><button onClick={() => handleAction('summarize')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Tóm tắt</button><button onClick={() => handleAction('key-points')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Điểm chính</button><button onClick={() => handleAction('titles')} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded font-bold transition-colors text-center">Tiêu đề</button><button onClick={() => handleAction('deep-analysis')} className="px-3 py-2 bg-violet-800 hover:bg-violet-700 text-white text-xs rounded font-bold transition-colors flex items-center justify-center gap-1.5" title="Sử dụng Gemini 3 Pro"><BrainCircuitIcon /> Phân tích sâu</button></div></div>;
 };
 
 const RemovalAuditReport = ({ metrics }: { metrics: RemovalAuditResult }) => {
-
     const getStatusChip = (status: DetailedRemovalRow['status']) => {
-        switch (status) {
-            case 'REPORTED': return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-gray-600 text-gray-300">REPORTED</span>;
-            case 'UNREPORTED': return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-700 text-red-200">UNREPORTED!</span>;
-            case 'USED_BUT_REPORTED': return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-yellow-700 text-yellow-200">USED (Reported)</span>;
-            case 'UNKNOWN_TIMESTAMP': return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-orange-700 text-orange-200">UNKNOWN TS</span>;
-            default: return null;
-        }
+        switch (status) { case 'REPORTED': return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-gray-600 text-gray-300">REPORTED</span>; case 'UNREPORTED': return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-700 text-red-200">UNREPORTED!</span>; case 'USED_BUT_REPORTED': return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-yellow-700 text-yellow-200">USED (Reported)</span>; case 'UNKNOWN_TIMESTAMP': return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-orange-700 text-orange-200">UNKNOWN TS</span>; default: return null; }
     };
-    
-    return (
-        <div className="mt-4 pt-4 border-t border-gray-700 text-xs text-gray-400 space-y-4">
-            <h4 className="font-bold text-gray-300 uppercase tracking-wider text-sm flex items-center gap-2"><CheckBadgeIcon /> QA & Removal Audit</h4>
-            
-            {/* Summary Block */}
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 text-center">
-                <div className="bg-slate-800/50 p-2 rounded"><div className="font-bold text-lg text-white">{metrics.step1ItemCount}</div><div className="text-[10px] uppercase text-gray-500">Step 1 Items</div></div>
-                <div className="bg-slate-800/50 p-2 rounded"><div className="font-bold text-lg text-green-400">{metrics.usedItemCount}</div><div className="text-[10px] uppercase text-gray-500">Used in Step 2</div></div>
-                <div className="bg-slate-800/50 p-2 rounded"><div className="font-bold text-lg text-white">{metrics.actuallyRemovedCount}</div><div className="text-[10px] uppercase text-gray-500">Actually Removed</div></div>
-                <div className={`bg-slate-800/50 p-2 rounded ${metrics.unreportedDropCount > 0 ? 'border border-red-600/50' : ''}`}><div className={`font-bold text-lg ${metrics.unreportedDropCount > 0 ? 'text-red-400' : 'text-white'}`}>{metrics.unreportedDropCount}</div><div className="text-[10px] uppercase text-gray-500">Unreported Drops</div></div>
-                <div className={`bg-slate-800/50 p-2 rounded ${metrics.usedButReportedCount > 0 ? 'border border-yellow-600/50' : ''}`}><div className={`font-bold text-lg ${metrics.usedButReportedCount > 0 ? 'text-yellow-400' : 'text-white'}`}>{metrics.usedButReportedCount}</div><div className="text-[10px] uppercase text-gray-500">Used but Reported</div></div>
-            </div>
-
-            {/* Ranges & Reasons */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                     <h5 className="font-bold text-gray-400 mb-2">Removed Ranges (≥ 15s gap)</h5>
-                     {metrics.removedRanges.length > 0 ? (
-                        <div className="space-y-1">
-                            {metrics.removedRanges.map((range, idx) => (
-                                <div key={idx} className="text-xs font-mono bg-gray-950/50 p-1 rounded">
-                                    <span className="text-amber-500">{range.start} - {range.end}</span> <span className="text-gray-500">({range.count} items)</span>
-                                </div>
-                            ))}
-                        </div>
-                     ) : <p className="italic text-gray-600">No significant ranges removed.</p>}
-                </div>
-                <div>
-                     <h5 className="font-bold text-gray-400 mb-2">Reported Reasons</h5>
-                     {Object.keys(metrics.reasonCounts).length > 0 ? (
-                        <div className="space-y-1">
-                             {Object.entries(metrics.reasonCounts).map(([reason, count]) => (
-                                 <div key={reason} className="flex justify-between items-center text-xs bg-gray-950/50 p-1 rounded">
-                                     <span className="text-gray-400">{reason}</span>
-                                     <span className="font-bold text-white">{count}</span>
-                                 </div>
-                             ))}
-                        </div>
-                     ) : <p className="italic text-gray-600">No reasons reported.</p>}
-                </div>
-            </div>
-
-            {/* Detailed List */}
-            <details className="bg-gray-950/30 rounded-lg">
-                <summary className="cursor-pointer p-2 font-bold text-gray-400 hover:bg-gray-950/50 rounded-t-lg">
-                    Detailed Removal List ({metrics.detailedRows.length} items)
-                </summary>
-                <div className="p-2 border-t border-gray-800 max-h-80 overflow-y-auto custom-scrollbar">
-                    <table className="w-full text-left text-xs">
-                        <thead className="sticky top-0 bg-gray-900 z-10">
-                            <tr>
-                                <th className="p-1.5 w-20">Timestamp</th>
-                                <th className="p-1.5 w-24">Status</th>
-                                <th className="p-1.5">Excerpt</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                        {metrics.detailedRows.map((row, idx) => (
-                            <tr key={idx} className="border-t border-gray-800/50 hover:bg-white/5">
-                                <td className="p-1.5 font-mono text-teal-500 align-top">{row.timestamp}</td>
-                                <td className="p-1.5 align-top">
-                                    {getStatusChip(row.status)}
-                                    {row.needsReview && <span className="block mt-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-pink-700 text-pink-200">MED-RISK</span>}
-                                </td>
-                                <td className="p-1.5 text-gray-400 italic">"{row.excerpt}"</td>
-                            </tr>
-                        ))}
-                        </tbody>
-                    </table>
-                </div>
-            </details>
-        </div>
-    );
+    return <div className="mt-4 pt-4 border-t border-gray-700 text-xs text-gray-400 space-y-4"><h4 className="font-bold text-gray-300 uppercase tracking-wider text-sm flex items-center gap-2"><CheckBadgeIcon /> QA & Removal Audit</h4><div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 text-center"><div className="bg-slate-800/50 p-2 rounded"><div className="font-bold text-lg text-white">{metrics.step1ItemCount}</div><div className="text-[10px] uppercase text-gray-500">Step 1 Items</div></div><div className="bg-slate-800/50 p-2 rounded"><div className="font-bold text-lg text-green-400">{metrics.usedItemCount}</div><div className="text-[10px] uppercase text-gray-500">Used in Step 2</div></div><div className="bg-slate-800/50 p-2 rounded"><div className="font-bold text-lg text-white">{metrics.actuallyRemovedCount}</div><div className="text-[10px] uppercase text-gray-500">Actually Removed</div></div><div className={`bg-slate-800/50 p-2 rounded ${metrics.unreportedDropCount > 0 ? 'border border-red-600/50' : ''}`}><div className={`font-bold text-lg ${metrics.unreportedDropCount > 0 ? 'text-red-400' : 'text-white'}`}>{metrics.unreportedDropCount}</div><div className="text-[10px] uppercase text-gray-500">Unreported Drops</div></div><div className={`bg-slate-800/50 p-2 rounded ${metrics.usedButReportedCount > 0 ? 'border border-yellow-600/50' : ''}`}><div className={`font-bold text-lg ${metrics.usedButReportedCount > 0 ? 'text-yellow-400' : 'text-white'}`}>{metrics.usedButReportedCount}</div><div className="text-[10px] uppercase text-gray-500">Used but Reported</div></div></div><div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><h5 className="font-bold text-gray-400 mb-2">Removed Ranges (≥ 15s gap)</h5>{metrics.removedRanges.length > 0 ? <div className="space-y-1">{metrics.removedRanges.map((range, idx) => <div key={idx} className="text-xs font-mono bg-gray-950/50 p-1 rounded"><span className="text-amber-500">{range.start} - {range.end}</span> <span className="text-gray-500">({range.count} items)</span></div>)}</div> : <p className="italic text-gray-600">No significant ranges removed.</p>}</div><div><h5 className="font-bold text-gray-400 mb-2">Reported Reasons</h5>{Object.keys(metrics.reasonCounts).length > 0 ? <div className="space-y-1">{Object.entries(metrics.reasonCounts).map(([reason, count]) => <div key={reason} className="flex justify-between items-center text-xs bg-gray-950/50 p-1 rounded"><span className="text-gray-400">{reason}</span><span className="font-bold text-white">{count}</span></div>)}</div> : <p className="italic text-gray-600">No reasons reported.</p>}</div></div><details className="bg-gray-950/30 rounded-lg"><summary className="cursor-pointer p-2 font-bold text-gray-400 hover:bg-gray-950/50 rounded-t-lg">Detailed Removal List ({metrics.detailedRows.length} items)</summary><div className="p-2 border-t border-gray-800 max-h-80 overflow-y-auto custom-scrollbar"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-gray-900 z-10"><tr><th className="p-1.5 w-20">Timestamp</th><th className="p-1.5 w-24">Status</th><th className="p-1.5">Excerpt</th></tr></thead><tbody>{metrics.detailedRows.map((row, idx) => <tr key={idx} className="border-t border-gray-800/50 hover:bg-white/5"><td className="p-1.5 font-mono text-teal-500 align-top">{row.timestamp}</td><td className="p-1.5 align-top">{getStatusChip(row.status)}{row.needsReview && <span className="block mt-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-pink-700 text-pink-200">MED-RISK</span>}</td><td className="p-1.5 text-gray-400 italic">"{row.excerpt}"</td></tr>)}</tbody></table></div></details></div>;
 };
 
-
-const ResultView = ({ 
-    result, 
-    isFinalizing, 
-    onTriggerStep2,
-    fileName
-}: { 
-    result: TranscriptionOutput | null, 
-    isFinalizing?: boolean,
-    onTriggerStep2: () => void,
-    fileName: string,
-}) => {
+const ResultView = ({ result, isFinalizing, onTriggerStep2, fileName, step2Batches, onRetryBatch }: { result: TranscriptionOutput | null, isFinalizing?: boolean, onTriggerStep2: () => void, fileName: string, step2Batches: Batch[], onRetryBatch: (id: string) => void }) => {
     const [aiActionResult, setAiActionResult] = useState<{title: string, content: string} | null>(null);
     const [isAiActionLoading, setIsAiActionLoading] = useState(false);
-
-    const metrics = useMemo(() => {
-        if (!result?.improved_transcript) return null;
-        return computeRemovalAudit(
-            result.improved_transcript,
-            result.post_edit_result?.refined_script || [],
-            result.post_edit_result?.removal_report
-        );
-    }, [result]);
-
+    const metrics = useMemo(() => result?.improved_transcript ? computeRemovalAudit(result.improved_transcript, result.post_edit_result?.refined_script || [], result.post_edit_result?.removal_report) : null, [result]);
     if (!result) return <div className="flex items-center justify-center h-full text-gray-500 italic">Chưa có kết quả xử lý.</div>;
-    
     const postEdit = result.post_edit_result;
     const hasRawData = result.improved_transcript && result.improved_transcript.length > 0;
-    const transcriptText = useMemo(() => {
-        if (postEdit?.refined_script) {
-            return postEdit.refined_script.map(item => `${item.speaker}: ${item.text}`).join('\n');
-        }
-        if (hasRawData) {
-            return result.improved_transcript.map(item => `${item.speaker || '[??]'}: ${item.edited}`).join('\n');
-        }
-        return '';
-    }, [result]);
-    
-    const downloadFile = (content: string, type: string, extension: string) => {
-        const safeFileName = fileName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        const blob = new Blob([content], { type });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${safeFileName}_${extension}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-    };
-
-    const handleDownloadStep1 = () => {
-        if (!result.improved_transcript) return;
-        const jsonContent = JSON.stringify(result.improved_transcript, null, 2);
-        downloadFile(jsonContent, 'application/json', 'step1_raw.json');
-    };
-
-    const handleDownloadStep2 = () => {
-        if (!postEdit?.refined_script) return;
-        const textContent = postEdit.refined_script
-            .map(item => `${item.start_timestamp}-${item.end_timestamp} ${item.speaker}:\n${item.text}`)
-            .join('\n\n');
-        downloadFile(textContent, 'text/plain', 'step2_refined.txt');
-    };
+    const transcriptText = useMemo(() => postEdit?.refined_script ? postEdit.refined_script.map(item => `${item.speaker}: ${item.text}`).join('\n') : hasRawData ? result.improved_transcript.map(item => `${item.speaker || '[??]'}: ${item.edited}`).join('\n') : '', [result]);
+    const downloadFile = (content: string, type: string, extension: string) => { const safeFileName = fileName.replace(/[^a-z0-9]/gi, '_').toLowerCase(); const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `${safeFileName}_${extension}`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); };
+    const handleDownloadStep1 = () => result.improved_transcript && downloadFile(JSON.stringify(result.improved_transcript, null, 2), 'application/json', 'step1_raw.json');
+    const handleDownloadStep2 = () => postEdit?.refined_script && downloadFile(postEdit.refined_script.map(item => `${item.start_timestamp}-${item.end_timestamp} ${item.speaker}:\n${item.text}`).join('\n\n'), 'text/plain', 'step2_refined.txt');
 
     return (
         <div className="space-y-6">
-             {/* --- TRIGGER BUTTON FOR STEP 2 (Only if not manual mode, as Manual Mode has button in sidebar) --- */}
              {hasRawData && !postEdit && !isFinalizing && (
-                 <div className="bg-blue-900/20 border border-blue-800 p-4 rounded-lg flex flex-col sm:flex-row items-center justify-between gap-4">
-                     <div>
-                         <h4 className="font-bold text-blue-400">Dữ liệu thô sẵn sàng ({result.improved_transcript.length} dòng)</h4>
-                         <p className="text-xs text-gray-400">Bạn có thể kiểm tra kỹ bản thô bên dưới trước khi chạy tinh chỉnh.</p>
-                     </div>
-                     <button 
-                        onClick={onTriggerStep2}
-                        className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-sm flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"
-                     >
-                         <PlayIcon /> Chạy Step 2 (Post-Edit)
-                     </button>
-                 </div>
+                 <div className="bg-blue-900/20 border border-blue-800 p-4 rounded-lg flex flex-col sm:flex-row items-center justify-between gap-4"><h4 className="font-bold text-blue-400">Dữ liệu thô sẵn sàng ({result.improved_transcript.length} dòng)</h4><button onClick={onTriggerStep2} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-sm flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"><PlayIcon /> Chạy Step 2 (Post-Edit)</button></div>
              )}
-            
-            {/* --- AI ACTIONS PANEL --- */}
-            {transcriptText && (
-                <AiActionsPanel 
-                    transcriptText={transcriptText}
-                    onResult={(title, content) => setAiActionResult({title, content})}
-                    onLoadingChange={setIsAiActionLoading}
-                />
-            )}
-            
-            {(isAiActionLoading || aiActionResult) && (
-                 <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 relative group">
-                     {isAiActionLoading ? (
-                        <div className="flex items-center justify-center gap-3 text-violet-300 animate-pulse">
-                            <LoaderIcon />
-                            <span>AI đang phân tích...</span>
-                        </div>
-                     ) : aiActionResult && (
-                        <div>
-                             <h3 className="font-bold text-violet-400 mb-2">{aiActionResult.title}</h3>
-                             <pre className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap font-sans bg-black/20 p-3 rounded">{aiActionResult.content}</pre>
-                        </div>
-                     )}
-                 </div>
-            )}
+            {transcriptText && <AiActionsPanel transcriptText={transcriptText} onResult={(title, content) => setAiActionResult({title, content})} onLoadingChange={setIsAiActionLoading} />}
+            {(isAiActionLoading || aiActionResult) && <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 relative group">{isAiActionLoading ? <div className="flex items-center justify-center gap-3 text-violet-300 animate-pulse"><LoaderIcon /><span>AI đang phân tích...</span></div> : aiActionResult && <div><h3 className="font-bold text-violet-400 mb-2">{aiActionResult.title}</h3><pre className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap font-sans bg-black/20 p-3 rounded">{aiActionResult.content}</pre></div>}</div>}
+             
+             {/* NEW: Batch Grid for Step 2 */}
+             {step2Batches && step2Batches.length > 0 && (
+                <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700">
+                    <h3 className="font-bold text-purple-400 uppercase text-xs tracking-wider mb-3">Tiến độ Step 2</h3>
+                    <BatchGrid batches={step2Batches} onRetry={onRetryBatch} />
+                </div>
+             )}
 
-
-             {/* --- STEP 2: PROFESSIONAL SCRIPT --- */}
              <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 relative group">
-                <div className="flex items-center justify-between mb-2">
-                    <h3 className="font-bold text-teal-400 uppercase text-xs tracking-wider flex items-center gap-2">
-                        <span>Script Bài Giảng Chuyên Nghiệp (Step 2)</span>
-                        {isFinalizing && <span className="animate-pulse text-blue-400 ml-2">- Đang tạo...</span>}
-                    </h3>
-                    {postEdit && (
-                         <button onClick={handleDownloadStep2} className="text-gray-500 hover:text-teal-400 transition-colors flex items-center gap-2 text-xs" title="Download as .txt">
-                            <DownloadIcon /> Tải TXT
-                        </button>
-                    )}
-                </div>
-
-                {metrics && postEdit && (
-                    <div className="text-xs font-mono text-gray-500 bg-gray-950/50 p-1.5 rounded-md mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
-                        <span>S1 Words: <b className="text-gray-300">{metrics.step1WordCount}</b></span>
-                        <span className="text-gray-600">|</span>
-                        <span>S2 Words: <b className="text-gray-300">{metrics.step2WordCount}</b></span>
-                        <span className="text-gray-600">|</span>
-                        <span>Δ: <b className={metrics.deltaWords >= 0 ? 'text-green-400' : 'text-red-400'}>{metrics.deltaWords}</b></span>
-                        <span className="text-gray-600">|</span>
-                        <span>%: <b className={metrics.deltaPercent >= 0 ? 'text-green-400' : 'text-red-400'}>{metrics.deltaPercent.toFixed(1)}%</b></span>
-                    </div>
-                )}
-                
-                {postEdit ? (
-                    <div className="space-y-4">
-                        {postEdit.refined_script?.map((item, idx) => (
-                            <div key={idx} className={`p-3 rounded bg-gray-800/50 border border-gray-700 ${item.needs_review ? 'border-yellow-600/50 bg-yellow-900/10' : ''}`}>
-                                <div className="flex items-center gap-2 mb-1">
-                                    <span className="text-xs font-bold text-teal-500 bg-gray-900 px-1.5 py-0.5 rounded">
-                                        {item.start_timestamp} - {item.end_timestamp}
-                                    </span>
-                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
-                                        item.speaker.includes("GV") ? "bg-blue-900 text-blue-300" : "bg-purple-900 text-purple-300"
-                                    }`}>
-                                        {item.speaker}
-                                    </span>
-                                    {item.needs_review && <span className="text-[10px] text-yellow-500 font-bold uppercase ml-auto">Needs Review</span>}
-                                </div>
-                                <p className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap">{item.text}</p>
-                            </div>
-                        ))}
-
-                        {/* Audit Info */}
-                        {metrics && <RemovalAuditReport metrics={metrics} />}
-                        
-                    </div>
-                ) : (
-                    <div className="text-gray-500 text-sm italic py-4 text-center">
-                        {isFinalizing ? "AI đang tổng hợp và tinh chỉnh kịch bản..." : "Script sẽ hiển thị tại đây sau khi bạn bấm 'Chạy Step 2'."}
-                    </div>
-                )}
+                <div className="flex items-center justify-between mb-2"><h3 className="font-bold text-teal-400 uppercase text-xs tracking-wider flex items-center gap-2"><span>Script Bài Giảng Chuyên Nghiệp (Step 2)</span>{isFinalizing && <span className="animate-pulse text-blue-400 ml-2">- Đang tạo...</span>}</h3>{postEdit && <button onClick={handleDownloadStep2} className="text-gray-500 hover:text-teal-400 transition-colors flex items-center gap-2 text-xs" title="Download as .txt"><DownloadIcon /> Tải TXT</button>}</div>
+                {metrics && postEdit && <div className="text-xs font-mono text-gray-500 bg-gray-950/50 p-1.5 rounded-md mb-3 flex flex-wrap items-center gap-x-3 gap-y-1"><span>S1 Words: <b className="text-gray-300">{metrics.step1WordCount}</b></span><span className="text-gray-600">|</span><span>S2 Words: <b className="text-gray-300">{metrics.step2WordCount}</b></span><span className="text-gray-600">|</span><span>Δ: <b className={metrics.deltaWords >= 0 ? 'text-green-400' : 'text-red-400'}>{metrics.deltaWords}</b></span><span className="text-gray-600">|</span><span>%: <b className={metrics.deltaPercent >= 0 ? 'text-green-400' : 'text-red-400'}>{metrics.deltaPercent.toFixed(1)}%</b></span></div>}
+                {postEdit ? <div className="space-y-4">{postEdit.refined_script?.map((item, idx) => <div key={idx} className={`p-3 rounded bg-gray-800/50 border border-gray-700 ${item.needs_review ? 'border-yellow-600/50 bg-yellow-900/10' : ''}`}><div className="flex items-center gap-2 mb-1"><span className="text-xs font-bold text-teal-500 bg-gray-900 px-1.5 py-0.5 rounded">{item.start_timestamp} - {item.end_timestamp}</span><span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${item.speaker.includes("GV") ? "bg-blue-900 text-blue-300" : "bg-purple-900 text-purple-300"}`}>{item.speaker}</span>{item.needs_review && <span className="text-[10px] text-yellow-500 font-bold uppercase ml-auto">Needs Review</span>}</div><p className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap">{item.text}</p></div>)}{metrics && <RemovalAuditReport metrics={metrics} />}</div> : <div className="text-gray-500 text-sm italic py-4 text-center">{isFinalizing ? "AI đang xử lý các batch..." : "Script sẽ hiển thị tại đây sau khi chạy Step 2."}</div>}
             </div>
-
-            {/* --- STEP 1: RAW TRANSCRIPT --- */}
-            <details className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 opacity-80 hover:opacity-100 transition-opacity" open={!postEdit}>
-                <summary className="flex items-center justify-between cursor-pointer">
-                    <h3 className="font-bold text-blue-400 uppercase text-xs tracking-wider">Bản ghi thô (Step 1 - Chi tiết)</h3>
-                     {hasRawData && (
-                        <div className="flex items-center gap-4">
-                            {metrics && (
-                                <span className="text-xs font-mono text-gray-500">Words: <b className="text-gray-300">{metrics.step1WordCount}</b></span>
-                            )}
-                            <button onClick={handleDownloadStep1} className="text-gray-500 hover:text-blue-400 transition-colors flex items-center gap-2 text-xs" title="Download as .json">
-                                <DownloadIcon /> Tải JSON
-                            </button>
-                        </div>
-                    )}
-                </summary>
-                <div className="mt-3 pt-3 border-t border-gray-700/50">
-                    {result.improved_transcript && <RawTranscriptView items={result.improved_transcript} />}
-                </div>
-            </details>
+            <details className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 opacity-80 hover:opacity-100 transition-opacity" open={!postEdit}><summary className="flex items-center justify-between cursor-pointer"><h3 className="font-bold text-blue-400 uppercase text-xs tracking-wider">Bản ghi thô (Step 1 - Chi tiết)</h3>{hasRawData && <div className="flex items-center gap-4">{metrics && <span className="text-xs font-mono text-gray-500">Words: <b className="text-gray-300">{metrics.step1WordCount}</b></span>}<button onClick={handleDownloadStep1} className="text-gray-500 hover:text-blue-400 transition-colors flex items-center gap-2 text-xs" title="Download as .json"><DownloadIcon /> Tải JSON</button></div>}</summary><div className="mt-3 pt-3 border-t border-gray-700/50">{result.improved_transcript && <RawTranscriptView items={result.improved_transcript} />}</div></details>
         </div>
     );
 };
