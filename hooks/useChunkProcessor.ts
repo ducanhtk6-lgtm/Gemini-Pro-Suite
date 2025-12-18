@@ -1,3 +1,4 @@
+
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, Type, HarmCategory, HarmBlockThreshold, Blob } from '@google/genai';
 import { Chunk, LogEntry, ProcessingStats, TranscriptionOutput, ImprovedTranscriptItem, PostEditResult, RateLimitEvent, RefinedScriptItem, Step3Result } from '../types';
@@ -117,47 +118,168 @@ QUY TRÌNH CHUẨN (BẮT BUỘC LÀM ĐÚNG THỨ TỰ):
 }`;
 
 const SYSTEM_PROMPT_STEP_2 = `VAI TRÒ (HARD CONSTRAINT):
-Bạn là "Medical Textbook Editor & Fidelity Guardian" (Biên tập viên Sách giáo khoa Y học & Người bảo vệ tính trung thực).
-Nhiệm vụ: Chuyển đổi transcript bài giảng/giao ban lâm sàng (dạng văn nói lộn xộn, nhiều từ thừa) thành "Văn bản Y học Chuyên khảo" (dạng văn viết gãy gọn, học thuật, súc tích).
+Bạn là "Lecture Script Cleaner + Medical Fidelity Guardian".
+Nhiệm vụ: 
+- Làm sạch transcript bước 1 thành "script bài giảng mạch lạc" (không phải chương sách học thuật).
+- Giữ trọn vẹn mọi nội dung giảng dạy y khoa của GIẢNG VIÊN.
+- Loại bỏ tối đa nhiễu (lời SV, hành chính, từ đệm) nhưng phải báo cáo rõ trong removal_report.
+- Chuẩn bị dữ liệu sạch, trung thực cho Step 3 (fidelity check + so sánh).
 
 MỤC TIÊU CỐT LÕI:
-1. "Clean Verbatim": Giữ 100% dữ kiện y khoa (Triệu chứng, Thuốc, Liều lượng, Cơ chế, Chỉ số cận lâm sàng, Lập luận chẩn đoán, Teaching Points).
-2. "Aggressive De-cluttering": Loại bỏ triệt để ngôn ngữ giao tiếp, từ đệm, thủ tục lớp học, và các đoạn dẫn dắt không mang thông tin chuyên môn.
+1. "Clean Verbatim cho GIẢNG VIÊN": 
+   - Giữ 100% dữ kiện y khoa do [GV] nói: triệu chứng, dấu hiệu, X-quang, cơ chế bệnh sinh, nhận định, chẩn đoán, điều trị, teaching points.
+2. "Aggressive De-cluttering đối với PHẦN KHÔNG QUAN TRỌNG":
+   - Loại bỏ triệt để ngôn ngữ giao tiếp, hành chính, thủ tục lớp học, từ đệm, lời SV không cần thiết.
+3. "Chuẩn bị cho Rà soát rủi ro sai nghĩa":
+   - Giảm mức độ diễn đạt lại (rephrase) để hạn chế drift.
+   - Chỉ chỉnh ngữ pháp & sắp xếp cho mạch lạc, không biến thành văn bản “sách giáo khoa”.
 
-QUY TẮC BIÊN TẬP (NGHIÊM NGẶT - PHẢI TUÂN THỦ):
+--------------------------------
+I. QUY TẮC BIÊN TẬP [GV] (GIẢNG VIÊN)
+--------------------------------
+1. PHẢI GIỮ:
+   - Mọi kiến thức y khoa, kinh nghiệm lâm sàng, phân tích phim, giải thích cơ chế, chiến lược chẩn đoán, hướng dẫn xử trí/điều trị.
+   - Mọi con số, liều lượng, ngưỡng xét nghiệm, dấu so sánh, phân độ, staging.
 
-1. XỬ LÝ NỘI DUNG [GV] (GIẢNG VIÊN):
-   - GIỮ NGUYÊN: Mọi kiến thức y khoa, kinh nghiệm lâm sàng, phân tích phim X-quang, giải thích cơ chế, hướng dẫn điều trị.
-   - XÓA TRIỆT ĐỂ (NOISE):
-     + Các câu dẫn dắt/quản lý lớp: "Mấy em có hỏi gì không?", "Tiếp đi em", "Nhìn lên bảng", "Đoạn này không thi", "Các bạn nắm được chưa?", "Khúc này không nằm trong mục tiêu", "Các bạn có thắc mắc gì với ca này không".
-     + Các từ đệm thừa thãi (Verbal tics) đặc trưng tiếng Việt: "Thì", "Là", "Cái", "Rằng", "Ở đây là", "Nói chung là", "Đại khái là", "Thật ra là", "Cái thứ hai là", "Cái này thì", "Cái mốc mà".
-     + Các đoạn "Meta-talk": "Bây giờ tôi sẽ đọc phim này", "Em đọc diễn tiến cho các bạn nắm đi". -> CHUYỂN THÀNH hành động trực tiếp hoặc xóa bỏ nếu không chứa thông tin y khoa.
-   - TÁI CẤU TRÚC (REPHRASE): Chuyển câu văn nói lủng củng thành câu khẳng định súc tích của sách giáo khoa.
-     + Gốc: "Cái thứ hai là đối với thuốc ho thì thôi khỏi nói, thuốc ho thì dễ rồi."
-     + Sửa: "Đối với thuốc ho, cách sử dụng đơn giản nên không cần bàn sâu."
+2. ĐƯỢC PHÉP LƯỢC BỎ (CHỈ LÀM SẠCH VĂN NÓI):
+   - Câu quản lớp/hành chính:
+     + "Mấy em có hỏi gì không?", "Tiếp đi em", "Nhìn lên bảng", 
+       "Khúc này không nằm trong mục tiêu", "Các bạn nắm được chưa?"...
+   - Từ đệm/tiếng nói lấp chỗ trống:
+     + "Thì", "Là", "Cái", "Rằng", "Ở đây là", "Nói chung là", "Đại khái là",
+       "Thật ra là", "Cái thứ hai là", "Cái này thì", "Cái mốc mà"...
+   - Meta-talk không mang nội dung y khoa:
+     + "Bây giờ tôi sẽ đọc phim này", "Em đọc diễn tiến cho các bạn nắm đi".
+     → HOẶC xóa, HOẶC chuyển thành hành động trực tiếp:
+       "Đọc phim X-quang: ...", "Diễn tiến bệnh nhân: ..."
 
-2. XỬ LÝ NỘI DUNG [SV] (SINH VIÊN/BÁC SĨ TRÌNH BỆNH):
-   - XÓA: Các từ "Dạ", "Thưa cô", "Em nghĩ là", "Tụi em thấy", "Hình như là" ở đầu câu.
-   - CHUYỂN ĐỔI: Nếu [SV] trình bày bệnh sử/diễn tiến, hãy biên tập lại thành văn phong "Báo cáo ca lâm sàng" (Case Report) chuẩn mực.
-     + Gốc: "Dạ, diễn tiến lúc nhập viện 5:30 ngày 11 tháng 11..."
-     + Sửa: "Diễn tiến lúc nhập viện (05:30, 11/11):..."
-   - GIỮ NGUYÊN: Các câu hỏi sai hoặc chẩn đoán sai của [SV] *NẾU VÀ CHỈ NẾU* sau đó [GV] sửa lại (đây là Teaching Point - Điểm giảng dạy). Nếu [SV] chỉ ậm ừ xác nhận ("Dạ", "Đúng ạ"), hãy xóa bỏ item đó và ghi vào removal_report.
+3. GIỚI HẠN REPHRASE (TRÁNH THÀNH VĂN BẢN HỌC THUẬT):
+   - CHO PHÉP:
+     + Ghép các mảnh câu nói ngắn, lủng củng thành câu đầy đủ nhưng vẫn giữ cấu trúc ý gốc.
+     + Sửa lỗi chính tả, chấm phẩy, lặp từ.
+   - KHÔNG CHO PHÉP:
+     + Biến câu nói thành đoạn văn sách giáo khoa quá bóng bẩy.
+     + Đổi thứ tự lập luận lớn (nguyên nhân → hậu quả, tiêu chuẩn → ngoại lệ).
+   - Nếu phải rút gọn 1 câu quá dài:
+     + Chỉ bỏ từ đệm, lặp lại, không bỏ ý y khoa.
+     + Nếu không chắc, giữ nguyên và đánh dấu needs_review=true.
 
-3. XỬ LÝ SỐ LIỆU & THUẬT NGỮ (TUYỆT ĐỐI KHÔNG SAI LỆCH):
-   - Giữ nguyên văn các con số (SpO2 98%, mạch 180, liều 9 mg/kg, liều 50-100 mg/kg). Không tự ý làm tròn.
-   - Giữ nguyên tên thuốc (Solu-Medrol, Ventolin, Pulmicort, Amoxicillin/acid clavulanic...).
-   - Nếu script gốc nói "1/4 ống" -> Giữ "1/4 ống". Không tự quy đổi ra ml nếu không chắc chắn.
+--------------------------------
+II. QUY TẮC XỬ LÝ [SV] (SINH VIÊN/BÁC SĨ TRÌNH BỆNH)
+--------------------------------
+1. NGUYÊN TẮC TRUNG TÂM:
+   - Đầu ra phải tập trung vào lời giảng của GIẢNG VIÊN.
+   - Lời [SV] chỉ giữ lại nếu thật sự cần để hiểu lời [GV] tiếp theo.
 
-========================
-ĐẦU VÀO (INPUT)
-========================
-Bạn sẽ nhận JSON ở trường "input". Chứa "improved_transcript" (mảng item).
+2. CÓ THỂ XOÁ BỎ HOÀN TOÀN (và ghi vào removal_report):
+   - Lời chào và đệm: "Dạ", "Thưa cô", "Đúng rồi ạ", "Em nghĩ là", "Tụi em thấy", "Hình như là"...
+   - Câu trả lời ngắn không mang thông tin:
+     + "Dạ đúng", "Dạ có", "Dạ không biết".
+   - Các đoạn [SV] chỉ đọc lại hồ sơ/diễn tiến/số liệu mà ngay sau đó [GV] đã nhắc lại và giải thích rõ hơn.
+   - Đặc biệt: 
+     + Các con số, đơn vị, dấu so sánh chỉ do [SV] đọc (không được [GV] xác nhận lại) có thể xóa,
+       vì người học chủ yếu cần số liệu do [GV] nhấn mạnh.
 
-========================
-ĐẦU RA (OUTPUT JSON - BẮT BUỘC ĐÚNG SCHEMA)
-========================
-Trả về một JSON có cấu trúc đúng như sau (STRICT JSON RFC 8259). Không thêm markdown, không thêm giải thích:
+3. CHUYỂN ĐỔI NẾU CẦN (KHI [SV] GIÚP ĐẶT BỐI CẢNH):
+   - Nếu [SV] trình bày bệnh sử/diễn tiến và [GV] dựa vào đó để giảng:
+     + Tóm lại nội dung thành 1–2 câu “case summary” gọn, rõ.
+     + Gắn cho speaker="[GV]" HOẶC để speaker="[SV]" nhưng đánh dấu needs_review nếu có rephrase nhiều.
+   - Ví dụ:
+     + Gốc [SV]: "Dạ, diễn tiến lúc nhập viện 5:30 ngày 11 tháng 11..."
+     + Sửa [script]: "Diễn tiến lúc nhập viện (05:30, 11/11): ..."
 
+4. PHẢI GIỮ LẠI MỘT SỐ CÂU [SV] ĐẶC BIỆT:
+   - Câu trả lời sai, chẩn đoán sai của [SV] nhưng ngay sau đó [GV] sửa và nhấn mạnh:
+     → ĐÂY LÀ TEACHING POINT, phải giữ nguyên cả cặp [SV] + [GV].
+   - Những câu hỏi từ [SV] mà [GV] lấy đó để giải thích một cơ chế/khái niệm quan trọng.
+   - Khi giữ lại, mô tả rõ trong qa_audit.notes rằng “giữ lại đối thoại để bảo tồn teaching moment”.
+
+--------------------------------
+III. SỐ LIỆU, ĐƠN VỊ, DẤU SO SÁNH & TOKEN NHẠY CẢM
+--------------------------------
+1. BẮT BUỘC GIỮ NGUYÊN (NẾU DO [GV] NÓI RA):
+   - Tất cả con số, đơn vị, liều, khoảng trị số xét nghiệm, phần trăm, ngưỡng chẩn đoán.
+   - Tất cả dấu so sánh: ">", "<", ">=", "<=", "≥", "≤".
+   - Tất cả token dạng @@...@@ (ví dụ @@CMP_GE_0015@@).
+   - Không được tự làm tròn, đổi đơn vị, hoặc suy luận giá trị mới.
+
+2. ĐƯỢC PHÉP BỎ HAY RÚT GỌN NẾU:
+   - Con số / đơn vị / dấu so sánh chỉ xuất hiện trong lời [SV] (không được [GV] xác nhận lại).
+   - Nhưng phải đảm bảo: nếu [GV] sau đó dùng chính số đó để lập luận, thì số ở phần [GV] vẫn phải được giữ nguyên.
+
+--------------------------------
+IV. ĐỊNH DẠNG DẠNG LIỆT KÊ & Ý LỚN / Ý NHỎ
+--------------------------------
+1. KHI [GV] NÓI THEO KIỂU LIỆT KÊ:
+   - Ví dụ lời nói:
+     "Chỉ định sinh thiết thận ở hội chứng thận hư bao gồm: thứ nhất là về độ tuổi... thứ hai là bổ thể C3, C4 giảm... thứ ba là..."
+   - Hãy chuyển thành dạng bullet rõ ràng trong trường "text" (trong cùng RefinedScriptItem) như:
+     - "Chỉ định sinh thiết thận trong hội chứng thận hư:
+       - Trẻ < 10 tuổi hoặc > 10 tuổi (tùy tiêu chí GV đưa ra).
+       - Bổ thể C3, C4 giảm.
+       - Nghi ngờ không phải hội chứng thận hư nguyên phát: anti-dsDNA (+)...
+       - Trước khi điều trị cyclosporin.
+       - ..."
+
+2. QUY TẮC:
+   - Không gom nhiều timestamp xa nhau vào một mục nếu không cùng ý.
+   - Các ý lớn/ý nhỏ chỉ tổ chức lại trong phạm vi các source_timestamps gần nhau (cùng một teaching point).
+
+--------------------------------
+V. ĐÁNH DẤU KEYWORD HIGH-YIELD (IN ĐẬM)
+--------------------------------
+1. KHÁI NIỆM "HIGH-YIELD":
+   - Tên bệnh, hội chứng, tiêu chuẩn chẩn đoán, phân loại.
+   - Ngưỡng số liệu quan trọng (ví dụ: eGFR, huyết áp, pH, PaCO2…).
+   - Liều thuốc, đường dùng, chống chỉ định quan trọng.
+   - Từ khóa làm mốc để nhớ guideline hoặc phác đồ.
+
+2. CÁCH THỰC HIỆN:
+   - Trong trường "text" của mỗi RefinedScriptItem:
+     + Dùng cú pháp Markdown **...** để in đậm các keyword high-yield.
+     + Không dùng các loại Markdown khác (không tiêu đề, không bullet Markdown ở mức ngoài; chỉ bullet bằng dấu "-" thuần text).
+   - Step 3 và phần export Word sẽ dựa vào **...** để giữ định dạng in đậm.
+
+--------------------------------
+VI. BÁO CÁO removal_report & qa_audit (ĐỂ PHÁT HIỆN VẤN ĐỀ NGẦM)
+--------------------------------
+1. removal_report.removed_from_main:
+   - Liệt kê mọi đoạn bị loại khỏi refined_script.
+   - reason có thể là:
+     "administrative", "pure_chitchat", "filler_only", "redundant_ack", 
+     "unclear_value_keep_out", "student_numerical_only", "duplicate_case_summary".
+   - verbatim_excerpt: trích đúng câu gốc (để người dùng kiểm tra khi nghi ngờ).
+
+2. qa_audit:
+   - gv_coverage_attestation:
+     + true nếu bạn chắc chắn mọi teaching point quan trọng của [GV] vẫn còn trong refined_script.
+     + false nếu có bất kỳ nghi ngờ nào.
+   - gv_items_total: tổng số item thuộc [GV] trong input.improved_transcript.
+   - gv_items_used_in_main: số item [GV] còn lại trong refined_script (sau khi merge/ghép).
+   - uncertain_items_count: số item có uncertain=true hoặc needs_review=true.
+   - risk_flags: tập hợp flag mô tả nguy cơ, ví dụ:
+     + "possible_teaching_point_dropped" (nghi ngờ lược bỏ nhầm).
+     + "heavy_rephrase_on_mechanism" (cơ chế bị diễn đạt lại nhiều).
+     + "many_uncertain_segments".
+     + "aggressive_student_cleaning_requires_review".
+   - notes: ghi rất ngắn gọn nhưng cụ thể:
+     + Ví dụ: "Đã loại nhiều đoạn [SV] đọc số liệu nhưng [GV] đã nhắc lại trong phần giảng, nên không ảnh hưởng nội dung."
+
+--------------------------------
+VII. INPUT / OUTPUT – GIỮ NGUYÊN SCHEMA JSON (RẤT QUAN TRỌNG)
+--------------------------------
+ĐẦU VÀO:
+Bạn sẽ nhận JSON ở trường "input" với cấu trúc:
+{
+  "mode": "POST_EDIT_LECTURE_SCRIPT",
+  "input": {
+    "improved_transcript": [
+      { "timestamp","speaker","original","edited","uncertain","chitchat" }
+    ]
+  }
+}
+
+ĐẦU RA (PHẢI LÀ JSON HỢP LỆ DUY NHẤT – KHÔNG THÊM TEXT BÊN NGOÀI):
 {
   "mode": "POST_EDIT_LECTURE_SCRIPT_RESULT",
   "refined_script": [
@@ -165,7 +287,7 @@ Trả về một JSON có cấu trúc đúng như sau (STRICT JSON RFC 8259). Kh
       "speaker": "[GV]" | "[SV]" | "[??]",
       "start_timestamp": "[MM:SS]",
       "end_timestamp": "[MM:SS]",
-      "text": "Nội dung đã biên tập thành văn viết y học súc tích, loại bỏ từ thừa.",
+      "text": "Script đã được làm sạch, mạch lạc, giữ nguyên ý, có thể có **từ khóa in đậm**.",
       "source_timestamps": ["[MM:SS]", "..."],
       "needs_review": true|false
     }
@@ -175,51 +297,38 @@ Trả về một JSON có cấu trúc đúng như sau (STRICT JSON RFC 8259). Kh
       {
         "timestamp": "[MM:SS]",
         "speaker": "[GV]" | "[SV]" | "[HC]" | "[??]",
-        "reason": "administrative | pure_chitchat | filler_only | redundant_ack | unclear_value_keep_out",
+        "reason": "administrative | pure_chitchat | filler_only | redundant_ack | unclear_value_keep_out | student_numerical_only | duplicate_case_summary",
         "verbatim_excerpt": "trích nguyên văn đoạn bị xóa"
       }
     ],
-    "removal_summary": "Tóm tắt NGẮN gọn loại nội dung đã xóa."
+    "removal_summary": "Tóm tắt rất ngắn gọn loại nội dung đã xóa."
   },
   "qa_audit": {
     "gv_coverage_attestation": true,
     "gv_items_total": 0,
     "gv_items_used_in_main": 0,
     "uncertain_items_count": 0,
-    "risk_flags": ["possible_teaching_point_dropped", "rephrased_complex_mechanism", "many_uncertain"],
+    "risk_flags": ["..."],
     "notes": "Ghi chú về các đoạn khó nghe hoặc nghi ngờ."
   }
 }
 
-========================
-HƯỚNG DẪN XỬ LÝ MỘT SỐ TÌNH HUỐNG CỤ THỂ (FEW-SHOT LEARNING TỪ DỮ LIỆU THỰC TẾ):
-========================
+YÊU CẦU KỸ THUẬT:
+- Chỉ trả về MỘT JSON object đúng schema trên.
+- KHÔNG thêm markdown bên ngoài các cặp **...** trong trường "text".
+- KHÔNG bọc output trong \`\`\` hoặc thêm giải thích bên ngoài JSON.
 
-Case 1: Xử lý từ đệm và câu hỏi thừa (Aggressive De-cluttering)
-Input: "[GV]: Thì bây giờ làm sao? Những ca này thì nếu em bé đang đáp ứng với điều trị hen thuận lợi, em có thể theo dõi mà không sử dụng kháng sinh luôn."
-Output Text: "Trong trường hợp bệnh nhi đáp ứng thuận lợi với điều trị hen, có thể tiếp tục theo dõi mà không cần chỉ định kháng sinh." (Loại bỏ "Thì bây giờ làm sao", "Những ca này thì").
-
-Case 2: Xử lý thủ tục hành chính (Administrative Removal)
-Input: "[GV]: Tiếp theo bé này sao em? Ở đây có bạn nào có thắc mắc gì không? Nếu không thì tiếp đi em."
-Output: (Xóa bỏ hoàn toàn khỏi refined_script, ghi vào removal_report với reason="administrative").
-
-Case 3: Xử lý trình bệnh của sinh viên (Student Case Report Style)
-Input: "[SV]: Dạ, về công thức máu, bé có hemoglobin là 9,3 g/dL. Hồng cầu nhỏ... Do đó tụi em thấy bé này có thiếu máu hồng cầu nhỏ nhược sắc."
-Output Text: "Công thức máu: Hemoglobin 9.3 g/dL, hồng cầu nhỏ, nhược sắc. Kết luận: Thiếu máu hồng cầu nhỏ nhược sắc mức độ nhẹ." (Bỏ "Dạ", "về", "là", "tụi em thấy").
-
-Case 4: Xử lý văn nói giải thích (Syntactic Reconstruction)
-Input: "[GV]: Cái thứ hai là đối với Corticoid, bé này là cơn nặng nên đã có chỉ định Corticoid toàn thân. Về lý thuyết, mình có 2 loại thuốc là..."
-Output Text: "Về Corticoid: Bệnh nhi có chỉ định Corticoid toàn thân do cơn hen nặng. Về lý thuyết có 2 nhóm thuốc:..." (Loại bỏ "Cái thứ hai là", "là", "thì").
-
-Case 5: Giữ nguyên tranh luận sai để sửa (Preserve Teaching Moment)
-Input:
-"[SV]: Dạ em nghĩ là dùng kháng sinh liều 50mg/kg ạ.
- [GV]: Không được, ca này phải dùng liều 80-90mg/kg vì nghi ngờ phế cầu kháng thuốc."
-Output: (Giữ nguyên cả 2 câu thoại này vì đây là tình huống dạy học quan trọng).
+--------------------------------
+VIII. CÁC CẠM BẪY THƯỜNG GẶP – PHẢI TRÁNH
+--------------------------------
+1) Không được đổi dấu so sánh, không được đổi số/đơn vị.
+2) Không lỡ tay xóa teaching point chỉ vì thấy lặp.
+3) Không giữ lại quá nhiều lời [SV] khiến script bị loãng.
+4) Khi nghi ngờ mình đã rephrase quá mạnh: đặt needs_review=true cho item đó 
+   và thêm flag "heavy_rephrase_on_mechanism" vào risk_flags.
 
 BẮT ĐẦU:
-Đọc "input.improved_transcript" và tạo output đúng schema JSON. Tuyệt đối không thêm lời bình luận.
-`;
+Đọc "input.improved_transcript", áp dụng các quy tắc trên và trả về đúng schema JSON.`;
 
 const SYSTEM_PROMPT_STEP_3 = `VAI TRÒ (HARD CONSTRAINT):
 Bạn là "Medical Academic Rewriter + Fidelity Auditor + Self-Corrector".
@@ -355,8 +464,7 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
                 setStats(prev => {
                     const newValue = prev.cooldownSeconds - 1;
                     if (newValue <= 0) {
-// FIX: Added missing backticks to template literal.
-                        addLog(`Hết thời gian chờ (Cooldown). Tiếp tục xử lý...`, 'info');
+                        addLog("Hết thời gian chờ (Cooldown). Tiếp tục xử lý...", 'info');
                         return { ...prev, isCoolingDown: false, cooldownSeconds: 0 };
                     }
                     return { ...prev, cooldownSeconds: newValue };
@@ -556,7 +664,6 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
                 required: ['improved_transcript', 'boundary'],
             };
 
-            // FIX: Moved safetySettings out of the config object.
             const apiCall = ai.models.generateContent({
                 model: modelStep1,
                 contents: { parts: [
@@ -566,13 +673,13 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
                 config: {
                     responseMimeType: "application/json",
                     responseSchema: responseSchema,
-                },
-                safetySettings: [
-                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                ]
+                    safetySettings: [
+                        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    ]
+                }
             });
 
             const timeoutPromise = new Promise((_, reject) => 
@@ -777,9 +884,9 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
             const s1Words = computeStep1WordCount(mergedTranscript);
             const s2Words = computeStep2WordCount(finalResult.refined_script);
             const delta = s2Words - s1Words;
-            const deltaPercent = s1Words > 0 ? (delta / s1Words * 100) : 0;
+            const deltaPercent = s1Words > 0 ? (delta / s1Words * 100).toFixed(1) : "0.0";
 // FIX: Added missing backticks to template literal.
-            addLog(`STEP 2 METRICS: segments=${finalResult.refined_script.length}, words=${s2Words}, deltaWords=${delta}, deltaPercent=${deltaPercent.toFixed(1)}%`, 'success');
+            addLog(`STEP 2 METRICS: segments=${finalResult.refined_script.length}, words=${s2Words}, deltaWords=${delta}, deltaPercent=${deltaPercent}%`, 'success');
 // FIX: Added missing backticks to template literal.
             addLog(`Hoàn tất Step 2: Đã tạo văn bản chuyên nghiệp.`, 'success');
 
@@ -966,6 +1073,188 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
         }
     };
 
+    // --- IMPORT HELPERS (Robust Parsing) ---
+
+    const normalizeJsonText = (raw: string): string => {
+        if (!raw) return "";
+        let s = raw;
+        // 1. Remove BOM
+        s = s.replace(/^\uFEFF/, '');
+        // 2. Remove Zero-width chars
+        s = s.replace(/[\u200B-\u200D\u2060]/g, '');
+        // 3. Normalize Smart Quotes
+        s = s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+        // 4. Strip Code Fences
+        s = s.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
+        
+        return s.trim();
+    };
+
+    const extractJsonPayload = (text: string): string => {
+        const firstBrace = text.indexOf('{');
+        const firstBracket = text.indexOf('[');
+        const start = (firstBrace === -1 && firstBracket === -1) 
+            ? -1 
+            : (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) 
+                ? firstBrace 
+                : firstBracket;
+        
+        if (start === -1) return text; // Can't find JSON start, return as is
+
+        const lastBrace = text.lastIndexOf('}');
+        const lastBracket = text.lastIndexOf(']');
+        const end = Math.max(lastBrace, lastBracket);
+
+        if (end > start) {
+            return text.substring(start, end + 1);
+        }
+        return text;
+    };
+
+    const parseMaybeDoubleEncoded = (text: string): any => {
+        const cleaned = extractJsonPayload(normalizeJsonText(text));
+        const parsed = JSON.parse(cleaned);
+        if (typeof parsed === 'string') {
+            // It was double encoded, parse again
+            return JSON.parse(normalizeJsonText(parsed));
+        }
+        return parsed;
+    };
+
+    // NEW: Robust Import Step 1 (Replace)
+    const manualImportStep1Json = (jsonString: string) => {
+        try {
+            const normalized = normalizeJsonText(jsonString);
+            const obj = parseMaybeDoubleEncoded(normalized);
+            let newItems = [];
+
+            // Robust unwrapping: handle both array and object wrapper formats
+            if (Array.isArray(obj)) {
+                 newItems = obj;
+            } else if (obj.improved_transcript) {
+                 newItems = obj.improved_transcript;
+            } else if (obj.result?.improved_transcript) {
+                 newItems = obj.result.improved_transcript;
+            } else if (obj.output?.improved_transcript) {
+                 newItems = obj.output.improved_transcript;
+            } else if (obj.payload) {
+                 newItems = obj.payload;
+            } else {
+                 throw new Error("Invalid Step 1 JSON. Could not find 'improved_transcript' array or valid data structure.");
+            }
+             
+            if (!Array.isArray(newItems)) {
+                throw new Error("Found data but it is not an array.");
+            }
+            if (newItems.length > 0 && (!newItems[0].timestamp && !newItems[0].original && !newItems[0].edited)) {
+                 throw new Error("Invalid Item structure. Items must have 'timestamp', 'original' or 'edited' fields.");
+            }
+
+            setResult(() => ({
+                improved_transcript: newItems,
+                validation_and_conclusion: "Manual Import (Step 1)",
+                professional_medical_text: "Ready for Step 2",
+                post_edit_result: undefined, // Invalidate Step 2
+                step3_result: undefined      // Invalidate Step 3
+            }));
+            addLog(`Đã Import (Replace) Step 1 JSON thành công: ${newItems.length} dòng.`, 'success');
+
+        } catch (e: any) {
+            console.error(e);
+            addLog(`Lỗi Import Step 1: ${e.message}`, 'error');
+            throw e;
+        }
+    };
+    
+    // NEW: Robust Import Step 2 -> Resume Step 3
+    const manualImportStep2Json = (jsonString: string) => {
+        try {
+            const normalized = normalizeJsonText(jsonString);
+            const obj = parseMaybeDoubleEncoded(normalized);
+            let candidate: any = null;
+
+            // Flexible unwrapping for various export formats
+            if (obj.post_edit_result) candidate = obj.post_edit_result;
+            else if (obj.result?.post_edit_result) candidate = obj.result.post_edit_result;
+            else if (obj.output?.post_edit_result) candidate = obj.output.post_edit_result;
+            else if (obj.mode && obj.refined_script) candidate = obj; // Direct object
+            else if (Array.isArray(obj)) {
+                 // Backward compatibility for raw arrays
+                 candidate = {
+                    mode: "MANUAL_IMPORT_ARRAY",
+                    refined_script: obj,
+                    removal_report: null, // Will set default below
+                    qa_audit: null        // Will set default below
+                };
+            } else if (obj.refined_script) {
+                 // Partial object match
+                 candidate = obj;
+            } else {
+                throw new Error("Không nhận diện được định dạng Step 2 JSON (PostEditResult). Vui lòng kiểm tra file.");
+            }
+
+            // Validate structure
+            if (!candidate.refined_script || !Array.isArray(candidate.refined_script)) {
+                 throw new Error("Dữ liệu thiếu 'refined_script' (Array).");
+            }
+            if (candidate.refined_script.length > 0) {
+                const first = candidate.refined_script[0];
+                if (!first.text && !first.speaker) {
+                     throw new Error("Item trong refined_script không đúng định dạng (thiếu text/speaker).");
+                }
+            }
+
+            // Set Defaults for missing fields (common in partial/legacy exports)
+            if (!candidate.removal_report) {
+                 candidate.removal_report = { 
+                     removed_from_main: [], 
+                     removal_summary: "Manual import: no removal report provided." 
+                 };
+            }
+            if (!candidate.qa_audit) {
+                 candidate.qa_audit = { 
+                     gv_coverage_attestation: false, 
+                     gv_items_total: 0, 
+                     gv_items_used_in_main: 0, 
+                     uncertain_items_count: 0, 
+                     risk_flags: ["MANUAL_IMPORT_NO_AUDIT"], 
+                     notes: "Manual import; QA audit missing." 
+                 };
+            }
+            
+            // Normalize items in refined_script to ensure required fields exist
+            candidate.refined_script = candidate.refined_script.map((item: any) => ({
+                ...item,
+                source_timestamps: Array.isArray(item.source_timestamps) ? item.source_timestamps : [],
+                needs_review: typeof item.needs_review === 'boolean' ? item.needs_review : false,
+                speaker: item.speaker || '[??]',
+                text: item.text || '',
+                start_timestamp: item.start_timestamp || '[00:00]',
+                end_timestamp: item.end_timestamp || '[00:00]'
+            }));
+
+            setResult(prev => ({
+                improved_transcript: prev?.improved_transcript || [], // Preserve existing Step 1 if any
+                validation_and_conclusion: prev?.validation_and_conclusion || "Manual Step 2 Import",
+                professional_medical_text: "Ready for Step 3",
+                post_edit_result: candidate as PostEditResult,
+                step3_result: undefined // Invalidate previous Step 3 result
+            }));
+
+            addLog(`Đã Import Step 2 JSON thành công: ${candidate.refined_script.length} đoạn. Sẵn sàng chạy Step 3.`, 'success');
+
+        } catch (e: any) {
+            console.error(e);
+            // Provide a clearer error snippet
+            const snippet = jsonString.length > 80 ? jsonString.substring(0, 80) + "..." : jsonString;
+            addLog(`Lỗi Import Step 2: ${e.message}`, 'error');
+            throw e; // Rethrow for UI handling
+        }
+    };
+    
+    // Alias for compatibility
+    const manualImportStep2ForStep3 = manualImportStep2Json;
+
     const triggerStep2 = () => {
         if (result?.improved_transcript && result.improved_transcript.length > 0) {
             performStep2Finalization(result.improved_transcript);
@@ -988,7 +1277,10 @@ export const useChunkProcessor = (file: File | null, modelStep1: string, modelSt
         retryChunk, retryAllFailed, initializeChunks, reset,
         triggerStep2, manualAppendTranscript,
         rateLimitEvent, clearCooldownNow,
-        triggerStep3, isStep3Running
+        triggerStep3, isStep3Running,
+        manualImportStep2ForStep3, 
+        manualImportStep1Json,
+        manualImportStep2Json
     };
 };
 
@@ -1324,7 +1616,6 @@ const runStep2Once = async (
         required: ["mode", "refined_script", "removal_report", "qa_audit"],
     };
 
-    // FIX: Moved safetySettings out of the config object.
     const apiCall = ai.models.generateContent({
         model,
         contents: { parts: [{ text: fullPrompt }] },
@@ -1333,13 +1624,13 @@ const runStep2Once = async (
             maxOutputTokens: 8192,
             responseMimeType: "application/json",
             responseSchema: responseSchema,
-        },
-        safetySettings: [
-            { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-            { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-            { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-        ]
+            safetySettings: [
+                { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            ]
+        }
     });
 
     const timeoutPromise = new Promise((_, reject) =>
@@ -1556,7 +1847,6 @@ const runStep3Once = async (
     };
 
     try {
-        // FIX: Moved safetySettings out of the config object.
         const response = await ai.models.generateContent({
             model,
             contents: { parts: [{ text: fullPrompt }] },
@@ -1564,13 +1854,13 @@ const runStep3Once = async (
                 temperature: 0.2,
                 responseMimeType: "application/json",
                 responseSchema: step3Schema,
-            },
-            safetySettings: [
-                { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-            ]
+                safetySettings: [
+                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                ]
+            }
         });
 
         const rawText = response.text;

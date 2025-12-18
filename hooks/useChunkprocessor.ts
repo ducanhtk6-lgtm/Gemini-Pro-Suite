@@ -1,3 +1,4 @@
+
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, Type, HarmCategory, HarmBlockThreshold, Blob } from '@google/genai';
 import { Chunk, LogEntry, ProcessingStats, TranscriptionOutput, ImprovedTranscriptItem, PostEditResult, RateLimitEvent, RefinedScriptItem, Step3Result } from '../types';
@@ -224,23 +225,52 @@ BẮT ĐẦU:
 const SYSTEM_PROMPT_STEP_3 = `VAI TRÒ (HARD CONSTRAINT):
 Bạn là "Medical Academic Rewriter + Fidelity Auditor + Self-Corrector".
 
+MỤC TIÊU TỐI THƯỢNG (KHÓA CỨNG):
+0) TUYỆT ĐỐI KHÔNG BỎ SÓT NỘI DUNG từ Step 2. Ưu tiên trung thực hơn văn vẻ.
+1) Chỉ được phép: sắp xếp lại bố cục theo đoạn; thêm heading/subheading khi thật sự chắc chắn giúp rõ ràng hơn.
+2) CẤM: tóm tắt, rút gọn, gom ý làm mất chi tiết; cấm tự bổ sung kiến thức y khoa ngoài input.
+
 NHIỆM VỤ:
-Chuyển dữ liệu Step 2 (refined_script) thành văn bản y khoa liên tục (đoạn văn học thuật), đồng thời:
+Chuyển dữ liệu Step 2 (refined_script) thành văn bản y khoa liên tục, đồng thời:
 (1) tạo bản nháp (draft),
 (2) chấm điểm rủi ro sai nghĩa so với input (1–5) kèm giải thích,
-(3) tự kiểm tra theo checklist và tự sửa để tạo bản cuối (final), xuất report cho người dùng.
+(3) tự kiểm tra theo checklist và tự sửa để tạo bản cuối (final), xuất report.
 
 NGUYÊN TẮC BẤT DI BẤT DỊCH:
 1) KHÔNG THÊM DỮ KIỆN MỚI. Mọi khẳng định trong output phải truy vết được về source_timestamps.
-2) KHÔNG ĐỔI NGHĨA. Đặc biệt cấm: đổi phủ định, đổi trái/phải, đổi nguyên nhân-kết quả, đổi thời điểm, đổi liều/đơn vị/chỉ số.
+2) KHÔNG ĐỔI NGHĨA. Cấm: đổi phủ định, đổi trái/phải, đổi nguyên nhân-kết quả, đổi thời điểm, đổi liều/đơn vị/chỉ số.
 3) BẢO TOÀN TOKEN NHẠY CẢM: mọi chuỗi dạng @@...@@, mọi số (kể cả dấu thập phân), đơn vị (mg, mmol/L...), dấu so sánh (> < >= <=), thời gian, tên thuốc, tên xét nghiệm.
-4) GIỮ DẤU HIỆU KHÔNG CHẮC: nếu input có needs_review=true hoặc nội dung mơ hồ, phải ghi chú "(cần kiểm tra)" tại đoạn liên quan và tăng risk_level.
-5) VĂN PHONG: tiếng Việt, học thuật, rõ ràng; chia đoạn hợp lý; ưu tiên 3–5 câu/đoạn; có ý lớn/ý nhỏ bằng heading/subheading (dạng dòng tiêu đề ngắn) nhưng tổng thể vẫn là văn bản liên tục.
+4) BẢO TOÀN TOÀN BỘ NỘI DUNG: không được làm mất bất kỳ câu/ý quan trọng nào của input. Nếu không chắc tổ chức lại thế nào → giữ cấu trúc an toàn (1 item = 1 đoạn).
+5) GIỮ DẤU HIỆU KHÔNG CHẮC: nếu input có needs_review=true hoặc nội dung mơ hồ, phải ghi chú CHÍNH XÁC "(cần kiểm tra)" tại đoạn liên quan và tăng risk_level (>=3).
+6) GIỮ THỨ TỰ: không đảo trật tự các ý lớn giữa các items.
+
+“CHIA ĐOẠN HỢP LÝ” (ĐỊNH NGHĨA CỤ THỂ — KHÔNG ĐƯỢC TỰ DIỄN GIẢI TÙY Ý):
+Bạn chỉ được tách đoạn khi có chuyển ý rõ ràng theo chủ đề, ví dụ:
+- Đại cương/định nghĩa → sinh lý bệnh/cơ chế → lâm sàng → cận lâm sàng → chẩn đoán → điều trị → theo dõi/biến chứng.
+- Bệnh sử → khám → xét nghiệm/CLS → đánh giá → xử trí.
+Không được tách đoạn:
+- Giữa một chuỗi lập luận/giải thích đang liền mạch cho cùng 1 luận điểm.
+- Giữa danh sách tiêu chuẩn/tiêu chí/thuốc-liều nếu chúng thuộc cùng 1 ý chính.
+Nếu không chắc: ưu tiên 1 item = 1 đoạn.
+
+HEADING / SUBHEADING (PHÂN TẦNG RÕ RÀNG):
+- heading: ý lớn, 2–8 từ, chỉ xuất hiện khi chắc chắn có “chuyển mảng chủ đề” (ví dụ: "CHẨN ĐOÁN", "ĐIỀU TRỊ", "CẬN LÂM SÀNG").
+- subheading: ý nhỏ trong cùng heading (ví dụ: "Kháng sinh", "Corticoid", "Tiêu chuẩn nặng").
+- Trong final.text (plain text), format bắt buộc:
+  + Nếu có heading: đặt heading trên 1 dòng riêng, IN HOA (ví dụ: CHẨN ĐOÁN)
+  + Nếu có subheading: đặt "- <subheading>:" trên 1 dòng riêng ngay dưới heading (hoặc đầu đoạn).
+  + Sau đó là đoạn văn.
+- Nếu không chắc đặt heading/subheading đúng: để heading=null, subheading=null (an toàn hơn).
+
+CÁCH VIẾT (Fidelity-first):
+- “Copy-first”: dùng câu chữ từ input làm nền tảng, chỉ chỉnh nhẹ để mạch lạc (thêm từ nối, chỉnh trật tự trong câu) nhưng KHÔNG được xóa ý/dữ kiện.
+- Không được gom nhiều câu thành một câu chung chung làm mất chi tiết.
+- Dữ kiện số liệu/liều/đơn vị/phân loại phải giữ nguyên.
 
 THANG ĐIỂM RỦI RO SAI NGHĨA (1–5):
 1 = Chỉ thay đổi văn phong, không ảnh hưởng nội dung.
 2 = Diễn đạt lại có thể gây mơ hồ nhẹ nhưng vẫn đúng.
-3 = Có nguy cơ hiểu sai nếu đọc nhanh (cần kiểm tra).
+3 = Có nguy cơ hiểu sai nếu đọc nhanh / có "(cần kiểm tra)".
 4 = Nguy cơ cao sai dữ kiện (số liệu/đơn vị/phủ định/laterality/thuật ngữ).
 5 = Mâu thuẫn hoặc không truy vết được về input (SAI NGHIÊM TRỌNG).
 
@@ -251,6 +281,28 @@ CHECKLIST TỰ KIỂM (BẮT BUỘC THỰC HIỆN TRƯỚC KHI TRẢ OUTPUT):
 - (C04) Bảo toàn laterality (trái/phải), vị trí, mốc thời gian
 - (C05) Thuật ngữ y khoa chính xác, không tự suy đoán
 - (C06) Mỗi đoạn phải có source_timestamps truy vết
+- (C07) COVERAGE: Không bỏ sót input. Union(source_timestamps) ở paragraphs phải bao phủ toàn bộ input source_timestamps. Nếu fail → overall_pass=false, remaining_risks thêm "POSSIBLE_OMISSION", notes ghi rõ phần thiếu.
+
+VÍ DỤ (ĐỂ HỌC THEO — KHÔNG ĐƯỢC TÓM TẮT):
+Ví dụ 1 (chuyển ý rõ: lâm sàng → CLS → điều trị):
+Input (3 items):
+- text: "Bệnh nhi ho khò khè, SpO2 92% khi thở khí trời."
+- text: "X-quang ngực: tăng sáng phổi, không thấy đông đặc."
+- text: "Điều trị: khí dung Ventolin, cân nhắc corticoid toàn thân nếu cơn nặng."
+Output final.text (minh họa format):
+LÂM SÀNG
+Bệnh nhi ho khò khè, SpO2 92% khi thở khí trời.
+CẬN LÂM SÀNG
+X-quang ngực: tăng sáng phổi, không thấy đông đặc.
+ĐIỀU TRỊ
+Điều trị: khí dung Ventolin, cân nhắc corticoid toàn thân nếu cơn nặng.
+
+Ví dụ 2 (needs_review):
+Input:
+- needs_review=true; text: "Cân nhắc liều Amoxicillin 80–90 mg/kg/ngày nếu nghi phế cầu kháng thuốc."
+Output yêu cầu:
+- Đoạn có "(cần kiểm tra)" ngay tại câu đó.
+- risk_level >=3.
 
 ĐẦU VÀO:
 Bạn sẽ nhận JSON có dạng:
@@ -271,11 +323,10 @@ Bạn sẽ nhận JSON có dạng:
 YÊU CẦU QUAN TRỌNG:
 - Nếu overall_pass=false: final.text vẫn phải là bản tốt nhất có thể, và các đoạn liên quan phải gắn "(cần kiểm tra)" rõ ràng.
 - paragraphs[].risk_level phải phản ánh rủi ro của đoạn đó.
-- meaning_drift_report.items chỉ liệt kê các điểm có risk>=3 (để report gọn, đúng trọng tâm).
+- meaning_drift_report.items chỉ liệt kê các điểm có risk>=3.
 - Không dùng markdown, không dùng \`\`\`.
 
-BẮT ĐẦU: đọc INPUT JSON và xuất đúng schema.
-`;
+BẮT ĐẦU: đọc INPUT JSON và xuất đúng schema.`;
 
 // FIX: Changed blob type to `globalThis.Blob` to use the native browser Blob, which is expected by FileReader.
 const blobToBase64 = (blob: globalThis.Blob): Promise<string> => {
@@ -1577,7 +1628,42 @@ const runStep3Once = async (
 // FIX: Added missing backticks to template literal.
              throw new Error(`Invalid JSON for Step 3: ${parseResult.reason}.`);
         }
-        return parseResult.value as Step3Result;
+        
+        const result = parseResult.value as Step3Result;
+
+        // --- CLIENT-SIDE COVERAGE GUARD ---
+        // Verify that all input items are represented in the output to prevent omission
+        const inputItems = batchRefinedItems;
+        const outputParagraphs = result.draft.paragraphs || [];
+        const usedTimestamps = new Set<string>();
+        outputParagraphs.forEach(p => p.source_timestamps?.forEach(ts => usedTimestamps.add(ts)));
+
+        const missingItems = inputItems.filter(item => {
+            // An item is considered missing if none of its source_timestamps appear in the output
+            // (Note: Step 2 items usually have [start, end] or more precise stamps in source_timestamps)
+            if (!item.source_timestamps || item.source_timestamps.length === 0) return false;
+            return !item.source_timestamps.some(ts => usedTimestamps.has(ts));
+        });
+
+        if (missingItems.length > 0) {
+            result.verification.overall_pass = false;
+            result.verification.checks.push({
+                id: "C07-GUARD",
+                name: "Client-side Coverage Guard",
+                pass: false,
+                notes: `Detected ${missingItems.length} missing items from Step 2 input.`
+            });
+            result.verification.remaining_risks.push("POSSIBLE_OMISSION_GUARD");
+
+            const appendix = missingItems.map(m => 
+                `[MISSING ${m.start_timestamp}-${m.end_timestamp}]: ${m.text}`
+            ).join('\n');
+
+            result.final.text += `\n\n=== PHỤ LỤC (cần kiểm tra): Nội dung Step 2 có nguy cơ bị bỏ sót ===\n${appendix}`;
+        }
+        // --- END GUARD ---
+
+        return result;
 
     } catch (e: any) {
         console.error("Error in runStep3Once", e);

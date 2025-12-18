@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
+
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Chunk, LogEntry, ProcessingStats, TranscriptionOutput, ImprovedTranscriptItem, RateLimitEvent, RemovalAuditResult, DetailedRemovalRow, Step3Result, Step3VerificationCheck, Step3MeaningDriftItem } from '../types';
 import { ActivityLog } from './ActivityLog';
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
@@ -37,15 +38,17 @@ interface DashboardProps {
     // Step 3 props
     triggerStep3: () => void;
     isStep3Running: boolean;
+    manualImportStep2ForStep3: (json: string) => void;
+    // New Robust Import Props
+    manualImportStep1Json: (json: string) => void;
+    manualImportStep2Json: (json: string) => void;
 }
 
 // Icons
 const FileTextIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>;
 const ClockIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>;
-// FIX: Modified component to accept and spread props to allow className to be passed.
 const CheckCircleIcon = (props: React.SVGProps<SVGSVGElement>) => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>;
 const LoaderIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>;
-// FIX: Modified component to accept and spread props to allow className to be passed.
 const AlertTriangleIcon = (props: React.SVGProps<SVGSVGElement>) => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>;
 const RefreshCwIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>;
 const CopyIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>;
@@ -60,6 +63,7 @@ const SparklesIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" he
 const BrainCircuitIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.993.142"/><path d="M12 5a3 3 0 1 1 5.993.142"/><path d="M15 12a3 3 0 1 0-5.993.142"/><path d="M15 12a3 3 0 1 1 5.993.142"/><path d="M9 12a3 3 0 1 0-5.993.142"/><path d="M9 12a3 3 0 1 1 5.993.142"/><path d="M12 19a3 3 0 1 0-5.993.142"/><path d="M12 19a3 3 0 1 1 5.993.142"/><path d="M16 8.27A3 3 0 0 1 14.23 11l-2.46 4a3 3 0 0 1-5.54.142"/><path d="M8 8.27A3 3 0 0 0 9.77 11l2.46 4a3 3 0 0 0 5.54.142"/></svg>;
 const CheckBadgeIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.78l1.21 1.21a2 2 0 0 0 2.82 0l1.21-1.21a4 4 0 0 1 4.78 4.78l-1.21 1.21a2 2 0 0 0 0 2.82l1.21 1.21a4 4 0 0 1-4.78 4.78l-1.21-1.21a2 2 0 0 0-2.82 0l-1.21 1.21a4 4 0 0 1-4.78-4.78l1.21-1.21a2 2 0 0 0 0-2.82z"/><path d="m9 12 2 2 4-4"/></svg>;
 const BookOpenIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>;
+const UploadIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>;
 
 
 const formatDuration = (ms: number) => {
@@ -69,6 +73,75 @@ const formatDuration = (ms: number) => {
     const s = seconds % 60;
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
+
+// --- Shared Download Helper ---
+const downloadFile = (content: string, type: string, extension: string, fileName: string) => {
+    const safeFileName = fileName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${safeFileName}_${extension}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+};
+
+// --- Helper: Safe HTML Escape ---
+const escapeHTML = (str: string) =>
+    str.replace(/[&<>'"]/g, 
+        tag => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            "'": '&#39;',
+            '"': '&quot;'
+        }[tag] || tag)
+    );
+
+// --- Export to Word Helper (HTML Mime Type) ---
+const exportToWord = (text: string, fileName: string) => {
+    // 1. First, escape HTML characters to prevent breaking tags (preserving < > for medical use)
+    let safe = escapeHTML(text);
+    
+    // 2. Apply formatting transformations on the ESCAPED text
+    // Bold regex: **text** -> <b>text</b>
+    safe = safe.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+    
+    // Highlight marker: (cần kiểm tra) -> span with style
+    // Use regex with global/case-insensitive flag
+    safe = safe.replace(/\(cần kiểm tra\)/gi, '<span style="color:#b91c1c;font-weight:bold;background-color:#fee2e2;">(cần kiểm tra)</span>');
+
+    // 3. Handle newlines by wrapping lines in <p>
+    const htmlBody = safe.split('\n').map(line => `<p>${line}</p>`).join('');
+
+    const docContent = `
+        <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+        <head><meta charset='utf-8'><title>Export</title>
+        <style>
+            body { font-family: 'Times New Roman', serif; font-size: 12pt; line-height: 1.5; }
+            b { font-weight: bold; }
+        </style>
+        </head>
+        <body>
+        ${htmlBody}
+        </body></html>
+    `;
+    
+    downloadFile(docContent, 'application/msword', 'doc', fileName);
+};
+
+// --- UI Helper: Highlight "Needs Check" ---
+const renderHighlightedNeedsCheck = (text: string) => {
+    const parts = text.split(/(\(cần kiểm tra\))/gi);
+    return parts.map((part, i) => 
+        part.toLowerCase() === '(cần kiểm tra)' ? (
+            <span key={i} className="text-red-400 font-bold bg-red-900/30 px-1 rounded mx-1">{part}</span>
+        ) : part
+    );
+};
+
 
 const ApiOverloadRecoveryPanel = ({
     rateLimitEvent,
@@ -154,7 +227,8 @@ const ApiOverloadRecoveryPanel = ({
 export const Dashboard: React.FC<DashboardProps> = ({
     file, onReset, chunks, stats, logs, result, fileType, retryChunk, retryAllFailed, isFinalizing, triggerStep2, manualAppendTranscript,
     step1Model, setStep1Model, step2Model, setStep2Model, rateLimitEvent, clearCooldownNow,
-    triggerStep3, isStep3Running
+    triggerStep3, isStep3Running, manualImportStep2ForStep3,
+    manualImportStep1Json, manualImportStep2Json
 }) => {
     const [elapsed, setElapsed] = useState(0);
     // If file is null, default to 'input' tab. Else default to 'grid'.
@@ -166,6 +240,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const isManualMode = !file;
     const hasStep1Data = !!result?.improved_transcript && result.improved_transcript.length > 0;
 
+    // Import States
+    const [importStep1Text, setImportStep1Text] = useState("");
+    const [importStep2Text, setImportStep2Text] = useState("");
+    
+    // Import Feedback State
+    const [importFeedback, setImportFeedback] = useState<{
+        step: "STEP1" | "STEP2";
+        ok: boolean;
+        message: string;
+        details?: string;
+    } | null>(null);
 
     // Timer effect
     useEffect(() => {
@@ -255,6 +340,57 @@ export const Dashboard: React.FC<DashboardProps> = ({
             setManualInput("");
         } catch (e: any) {
             alert("Lỗi dữ liệu: " + e.message);
+        }
+    };
+    
+    // NEW: Safe Wrapper for Imports
+    const handleSafeImport = (fn: (json: string) => void, json: string, step: "STEP1" | "STEP2") => {
+        try {
+            setImportFeedback(null);
+            fn(json);
+            setImportFeedback({
+                step,
+                ok: true,
+                message: "Import thành công!"
+            });
+            // Auto-clear success message after 3s
+            setTimeout(() => {
+                setImportFeedback((prev) => (prev?.ok && prev.step === step ? null : prev));
+            }, 3000);
+        } catch (e: any) {
+             setImportFeedback({
+                step,
+                ok: false,
+                message: `Import thất bại: ${e.message}`,
+                details: json.length > 200 ? json.substring(0, 200) + "..." : json
+            });
+        }
+    };
+
+
+    const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>, type: 'STEP1' | 'STEP2') => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        try {
+            const text = await file.text();
+            handleSafeImport(
+                type === 'STEP1' ? manualImportStep1Json : manualImportStep2Json,
+                text,
+                type
+            );
+            if (type === 'STEP1') setImportStep1Text(""); 
+            else setImportStep2Text("");
+        } catch (err: any) {
+            console.error("File Read Error:", err);
+             setImportFeedback({
+                step: type,
+                ok: false,
+                message: `Lỗi đọc file: ${err.message}`
+            });
+        } finally {
+            // Reset input value to allow selecting same file again
+            e.target.value = '';
         }
     };
 
@@ -393,9 +529,82 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         
                         {activeTab === 'input' && isManualMode && (
                             <div className="flex flex-col h-full gap-4">
+                                
+                                {/* ---------------- NEW IMPORT SECTION ---------------- */}
+                                <details className="bg-gray-800/30 border border-gray-700/50 p-3 rounded-lg" open>
+                                    <summary className="text-xs font-bold text-gray-400 uppercase tracking-wider cursor-pointer hover:text-white transition-colors mb-2">Resume từ JSON Export (Step 1 / Step 2)</summary>
+                                    
+                                    {/* --- FEEDBACK ALERT BANNER --- */}
+                                    {importFeedback && (
+                                        <div className={`mb-4 p-3 rounded border text-sm flex items-start gap-2 ${importFeedback.ok ? 'bg-green-900/30 border-green-700 text-green-300' : 'bg-red-900/30 border-red-700 text-red-300'}`}>
+                                            {importFeedback.ok ? <CheckCircleIcon /> : <AlertTriangleIcon />}
+                                            <div className="flex-1">
+                                                <div className="font-bold">{importFeedback.message}</div>
+                                                {importFeedback.details && (
+                                                    <pre className="mt-1 text-[10px] font-mono bg-black/30 p-1 rounded opacity-80 whitespace-pre-wrap break-all">{importFeedback.details}</pre>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        
+                                        {/* Block A: Import Step 1 (Replace) */}
+                                        <div className="flex flex-col gap-2 bg-gray-900/30 p-2 rounded border border-gray-700/30">
+                                            <label className="text-[10px] font-bold text-blue-400 uppercase">Import Step 1 JSON (Replace)</label>
+                                            <textarea 
+                                                className="w-full h-16 bg-gray-900 border border-gray-700 rounded p-2 text-xs font-mono text-gray-300 focus:outline-none focus:border-blue-500"
+                                                placeholder='Paste Step 1 JSON here...'
+                                                value={importStep1Text}
+                                                onChange={(e) => setImportStep1Text(e.target.value)}
+                                            />
+                                            <div className="flex items-center justify-between">
+                                                <label className="cursor-pointer px-2 py-1 bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded text-[10px] font-bold text-gray-300 flex items-center gap-1 transition-colors">
+                                                    <UploadIcon /> Upload JSON
+                                                    <input type="file" accept=".json" className="hidden" onChange={(e) => handleFileImport(e, 'STEP1')} />
+                                                </label>
+                                                <button 
+                                                    onClick={() => { handleSafeImport(manualImportStep1Json, importStep1Text, 'STEP1'); setImportStep1Text(""); }}
+                                                    disabled={!importStep1Text.trim()}
+                                                    className="px-3 py-1 bg-blue-700 hover:bg-blue-600 text-white text-xs rounded font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    Nạp Step 1
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Block B: Import Step 2 (Resume) */}
+                                        <div className="flex flex-col gap-2 bg-gray-900/30 p-2 rounded border border-gray-700/30">
+                                            <label className="text-[10px] font-bold text-teal-400 uppercase">Import Step 2 JSON (Resume Step 3)</label>
+                                            <textarea 
+                                                className="w-full h-16 bg-gray-900 border border-gray-700 rounded p-2 text-xs font-mono text-gray-300 focus:outline-none focus:border-teal-500"
+                                                placeholder='Paste Step 2 JSON here (PostEditResult)...'
+                                                value={importStep2Text}
+                                                onChange={(e) => setImportStep2Text(e.target.value)}
+                                            />
+                                            <div className="flex items-center justify-between">
+                                                <label className="cursor-pointer px-2 py-1 bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded text-[10px] font-bold text-gray-300 flex items-center gap-1 transition-colors">
+                                                    <UploadIcon /> Upload JSON
+                                                    <input type="file" accept=".json" className="hidden" onChange={(e) => handleFileImport(e, 'STEP2')} />
+                                                </label>
+                                                <button 
+                                                    onClick={() => { handleSafeImport(manualImportStep2Json, importStep2Text, 'STEP2'); setImportStep2Text(""); }}
+                                                    disabled={!importStep2Text.trim()}
+                                                    className="px-3 py-1 bg-teal-800 hover:bg-teal-700 text-teal-100 text-xs rounded font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    Nạp Step 2
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                </details>
+                                {/* ---------------- END IMPORT SECTION ---------------- */}
+
+
                                 <div className="flex flex-col gap-2 h-full">
-                                    <div className="flex justify-between items-center">
-                                         <label className="text-xs font-bold text-gray-400 uppercase">Dữ liệu đầu vào</label>
+                                    <div className="flex justify-between items-center mt-2">
+                                         <label className="text-xs font-bold text-gray-400 uppercase">Nhập liệu thủ công (Nối thêm)</label>
                                          <div className="flex bg-gray-900 rounded-lg p-1 border border-gray-700">
                                             <button 
                                                 onClick={() => setInputType('json')}
@@ -459,6 +668,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                 fileName={file?.name || 'manual_transcript'}
                                 onTriggerStep3={triggerStep3}
                                 isStep3Running={isStep3Running}
+                                onImportStep2Json={manualImportStep2Json}
                             />
                         )}
                     </div>
@@ -627,13 +837,13 @@ const AiActionsPanel = ({ transcriptText, onResult, onLoadingChange }: { transcr
                 contents: prompt,
                 config: {
                     ...config,
+                    safetySettings: [
+                        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                    ],
                 },
-                safetySettings: [
-                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                ],
             });
             onResult(title, response.text || 'Không có phản hồi.');
         } catch (error: any) {
@@ -758,17 +968,13 @@ const Step3Report = ({ result, fileName }: { result: Step3Result, fileName: stri
         setTimeout(() => setCopied(false), 2000);
     };
 
-    const downloadFile = (content: string, type: string, extension: string) => {
-        const safeFileName = fileName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        const blob = new Blob([content], { type });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${safeFileName}_${extension}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+    const handleDownloadJson = () => {
+        const jsonContent = JSON.stringify(result, null, 2);
+        downloadFile(jsonContent, 'application/json', 'step3_full_result.json', fileName);
+    };
+
+    const handleDownloadDoc = () => {
+        exportToWord(result.final.text, `${fileName}_step3_final`);
     };
 
     const getRiskColor = (level: number) => {
@@ -790,7 +996,13 @@ const Step3Report = ({ result, fileName }: { result: Step3Result, fileName: stri
                          <button onClick={handleCopy} className="text-gray-500 hover:text-indigo-400 transition-colors flex items-center gap-2 text-xs">
                             {copied ? <CheckCircleIcon /> : <CopyIcon />} {copied ? 'Đã chép' : 'Chép'}
                         </button>
-                        <button onClick={() => downloadFile(result.final.text, 'text/plain', 'step3_final.txt')} className="text-gray-500 hover:text-indigo-400 transition-colors flex items-center gap-2 text-xs">
+                        <button onClick={handleDownloadJson} className="text-gray-500 hover:text-indigo-400 transition-colors flex items-center gap-2 text-xs">
+                            <DownloadIcon /> Tải JSON
+                        </button>
+                        <button onClick={handleDownloadDoc} className="text-gray-500 hover:text-indigo-400 transition-colors flex items-center gap-2 text-xs">
+                            <FileTextIcon /> Tải DOC
+                        </button>
+                        <button onClick={() => downloadFile(result.final.text, 'text/plain', 'step3_final.txt', fileName)} className="text-gray-500 hover:text-indigo-400 transition-colors flex items-center gap-2 text-xs">
                             <DownloadIcon /> Tải TXT
                         </button>
                     </div>
@@ -806,7 +1018,9 @@ const Step3Report = ({ result, fileName }: { result: Step3Result, fileName: stri
                     <span className="text-gray-600">|</span>
                     <span>High-Risk Items: <b className={result.meaning_drift_report.summary.high_risk_count > 0 ? 'text-red-400' : 'text-gray-300'}>{result.meaning_drift_report.summary.high_risk_count}</b></span>
                 </div>
-                <pre className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap font-sans bg-black/20 p-3 rounded max-h-[400px] overflow-y-auto custom-scrollbar">{result.final.text}</pre>
+                <pre className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap font-sans bg-black/20 p-3 rounded max-h-[400px] overflow-y-auto custom-scrollbar">
+                    {renderHighlightedNeedsCheck(result.final.text)}
+                </pre>
             </div>
             
             {/* Details */}
@@ -858,6 +1072,7 @@ const ResultView = ({
     fileName,
     onTriggerStep3,
     isStep3Running,
+    onImportStep2Json,
 }: { 
     result: TranscriptionOutput | null, 
     isFinalizing?: boolean,
@@ -865,9 +1080,11 @@ const ResultView = ({
     fileName: string,
     onTriggerStep3: () => void,
     isStep3Running?: boolean,
+    onImportStep2Json: (json: string) => void,
 }) => {
     const [aiActionResult, setAiActionResult] = useState<{title: string, content: string} | null>(null);
     const [isAiActionLoading, setIsAiActionLoading] = useState(false);
+    const [importJsonInput, setImportJsonInput] = useState("");
 
     const metrics = useMemo(() => {
         if (!result?.improved_transcript) return null;
@@ -894,23 +1111,10 @@ const ResultView = ({
         return '';
     }, [result]);
     
-    const downloadFile = (content: string, type: string, extension: string) => {
-        const safeFileName = fileName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        const blob = new Blob([content], { type });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${safeFileName}_${extension}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-    };
-
     const handleDownloadStep1 = () => {
         if (!result.improved_transcript) return;
         const jsonContent = JSON.stringify(result.improved_transcript, null, 2);
-        downloadFile(jsonContent, 'application/json', 'step1_raw.json');
+        downloadFile(jsonContent, 'application/json', 'step1_raw.json', fileName);
     };
 
     const handleDownloadStep2 = () => {
@@ -918,7 +1122,28 @@ const ResultView = ({
         const textContent = postEdit.refined_script
             .map(item => `${item.start_timestamp}-${item.end_timestamp} ${item.speaker}:\n${item.text}`)
             .join('\n\n');
-        downloadFile(textContent, 'text/plain', 'step2_refined.txt');
+        downloadFile(textContent, 'text/plain', 'step2_refined.txt', fileName);
+    };
+    
+    const handleDownloadStep2JSON = () => {
+        if (!postEdit) return;
+        // Fix double encoding issue by stringifying directly
+        const jsonContent = JSON.stringify(postEdit, null, 2);
+        downloadFile(jsonContent, 'application/json', 'step2_post_edit.json', fileName);
+    };
+
+    const handleDownloadStep2Doc = () => {
+        if (!postEdit?.refined_script) return;
+        const textContent = postEdit.refined_script
+            .map(item => `**${item.start_timestamp}-${item.end_timestamp} ${item.speaker}:**\n${item.text}`)
+            .join('\n\n');
+        exportToWord(textContent, `${fileName}_step2_refined`);
+    };
+
+    const handleImportStep2 = () => {
+        if (!importJsonInput.trim()) return;
+        onImportStep2Json(importJsonInput);
+        setImportJsonInput(""); // Clear after attempt
     };
 
     return (
@@ -938,6 +1163,7 @@ const ResultView = ({
                      </button>
                  </div>
              )}
+             
             {postEdit && !step3 && !isStep3Running && (
                 <div className="bg-indigo-900/20 border border-indigo-800 p-4 rounded-lg flex flex-col sm:flex-row items-center justify-between gap-4">
                      <div>
@@ -990,9 +1216,29 @@ const ResultView = ({
                         {isFinalizing && <span className="animate-pulse text-blue-400 ml-2">- Đang tạo...</span>}
                     </h3>
                     {postEdit && (
-                         <button onClick={handleDownloadStep2} className="text-gray-500 hover:text-teal-400 transition-colors flex items-center gap-2 text-xs" title="Download as .txt">
-                            <DownloadIcon /> Tải TXT
-                        </button>
+                        <div className="flex items-center gap-2">
+                             <button 
+                                onClick={(e) => { e.stopPropagation(); handleDownloadStep2JSON(); }} 
+                                className="text-gray-500 hover:text-teal-400 transition-colors flex items-center gap-2 text-xs" 
+                                title="Download as .json"
+                             >
+                                <DownloadIcon /> Tải JSON
+                            </button>
+                             <button 
+                                onClick={(e) => { e.stopPropagation(); handleDownloadStep2Doc(); }} 
+                                className="text-gray-500 hover:text-teal-400 transition-colors flex items-center gap-2 text-xs" 
+                                title="Download as .doc (Word)"
+                             >
+                                <FileTextIcon /> Tải DOC
+                            </button>
+                             <button 
+                                onClick={(e) => { e.stopPropagation(); handleDownloadStep2(); }} 
+                                className="text-gray-500 hover:text-teal-400 transition-colors flex items-center gap-2 text-xs" 
+                                title="Download as .txt"
+                            >
+                                <DownloadIcon /> Tải TXT
+                            </button>
+                        </div>
                     )}
                 </summary>
                 <div className="mt-3 pt-3 border-t border-gray-700/50">
