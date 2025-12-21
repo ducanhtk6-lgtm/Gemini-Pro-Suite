@@ -3,8 +3,8 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { TranscriptionTurn } from './types';
 import { createBlob } from './utils/audio';
-// FIX: Match file casing on disk (useChunkProcessor.ts)
-import { useChunkProcessor } from './hooks/useChunkProcessor';
+// FIX: Match file casing on disk (useChunkprocessor.ts)
+import { useChunkProcessor } from './hooks/useChunkprocessor';
 import { Dashboard } from './components/Dashboard';
 import { ImageGenerator } from './components/ImageGenerator';
 
@@ -262,6 +262,7 @@ const App: React.FC = () => {
                                 >
                                     <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                                     <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                                    <option value="gemini-3-flash">Gemini 3 Flash</option>
                                     <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                                 </select>
                                 <p className="text-xs text-gray-500 mt-1">Nhanh & rẻ (Flash), Cân bằng (2.5 Pro), Mạnh nhất (3 Pro).</p>
@@ -277,6 +278,7 @@ const App: React.FC = () => {
                                 >
                                     <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                                     <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                                    <option value="gemini-3-flash">Gemini 3 Flash</option>
                                     <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                                 </select>
                                 <p className="text-xs text-gray-500 mt-1">Mạnh mẽ hơn, tạo script chuyên nghiệp, chi phí cao hơn.</p>
